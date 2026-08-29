@@ -47,14 +47,17 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.6
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
 
       - name: Build Android APK with Gradle
         working-directory: mobile/android
         run: |
-          chmod +x gradlew || gradle wrapper
-          ./gradlew assembleDebug --stacktrace
+          gradle wrapper --gradle-version 8.6 --distribution-type bin
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Prepare APK Output
         run: |
@@ -68,7 +71,7 @@ jobs:
           path: release-apk/claude-remote.apk
           if-no-files-found: error
 
-      - name: Create GitHub Release (Optional for Tags & Manual Dispatch)
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
