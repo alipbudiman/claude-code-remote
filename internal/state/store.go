@@ -171,13 +171,13 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 	case "SessionStart":
 		sess.Status = models.StatusActive
 		sess.CurrentToolStatus = "Claude Code connected"
-		appendLog("Session started")
-		notifTitle = "Claude Code Active"
-		notifBody = fmt.Sprintf("Session connected for %s", sess.ProjectName)
+		sess.PendingQuestion = nil
+		appendLog("Session connected")
+		notifTitle = "Claude Code Connected"
+		notifBody = fmt.Sprintf("Session active for %s", sess.ProjectName)
 		notifType = "working"
 
 	case "PreToolUse":
-		sess.Status = models.StatusActive
 		sess.CurrentTool = payload.ToolName
 		statusDesc := hooks.FormatToolStatus(payload.ToolName, payload.ToolInput)
 		sess.CurrentToolStatus = statusDesc
@@ -186,8 +186,44 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 		appendLog(statusDesc)
 
-		// Check if this tool spawns a sub-agent
-		if payload.ToolName == "Task" || payload.ToolName == "Agent" || payload.ToolName == "invoke_subagent" {
+		// Check if tool is AskUserQuestion / ask_question
+		if payload.ToolName == "AskUserQuestion" || payload.ToolName == "ask_question" {
+			sess.Status = models.StatusWaitingPermission
+			qText := "Claude Code is asking for your input"
+			var options []string
+
+			if payload.ToolInput != nil {
+				if q, ok := payload.ToolInput["question"].(string); ok && q != "" {
+					qText = q
+				} else if qs, ok := payload.ToolInput["questions"].([]interface{}); ok && len(qs) > 0 {
+					if firstQ, ok := qs[0].(map[string]interface{}); ok {
+						if qStr, ok := firstQ["question"].(string); ok {
+							qText = qStr
+						}
+						if opts, ok := firstQ["options"].([]interface{}); ok {
+							for _, o := range opts {
+								if s, ok := o.(string); ok {
+									options = append(options, s)
+								}
+							}
+						}
+					}
+				}
+			}
+
+			sess.PendingQuestion = &models.PendingQuestion{
+				Type:     "question",
+				Title:    "Question from Claude",
+				Question: qText,
+				ToolName: payload.ToolName,
+				Options:  options,
+				AskedAt:  time.Now(),
+			}
+			notifTitle = "❓ Claude Code Question"
+			notifBody = qText
+			notifType = "permission"
+		} else if payload.ToolName == "Task" || payload.ToolName == "Agent" || payload.ToolName == "invoke_subagent" {
+			sess.Status = models.StatusSubagentRunning
 			subID := payload.ToolUseID
 			if subID == "" {
 				subID = fmt.Sprintf("sub-%d", time.Now().UnixNano())
@@ -209,16 +245,17 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			}
 			sess.ActiveSubagents[subID] = sub
 			s.subagents[subID] = sub
-			sess.Status = models.StatusSubagentRunning
-			notifTitle = "Sub-Agent Spawned"
+			notifTitle = "🤖 Sub-Agent Launched"
 			notifBody = fmt.Sprintf("Sub-agent running: %s", desc)
 			notifType = "subagent"
+		} else {
+			sess.Status = models.StatusActive
+			sess.PendingQuestion = nil
 		}
 
 	case "PostToolUse", "PostToolUseFailure":
 		if payload.ToolUseID != "" {
 			delete(sess.ActiveToolIDs, payload.ToolUseID)
-			// Check if this completes a subagent
 			if sub, hasSub := sess.ActiveSubagents[payload.ToolUseID]; hasSub {
 				t := time.Now()
 				sub.CompletedAt = &t
@@ -227,12 +264,44 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
 				delete(sess.ActiveSubagents, payload.ToolUseID)
 				appendLog(fmt.Sprintf("Sub-agent finished: %s", sub.Description))
+				notifTitle = "🤖 Sub-Agent Completed"
+				notifBody = fmt.Sprintf("%s finished: %s", sub.AgentType, sub.Description)
+				notifType = "subagent"
 			}
 		}
-		if len(sess.ActiveToolIDs) == 0 && len(sess.ActiveSubagents) == 0 {
+		if len(sess.ActiveToolIDs) == 0 && len(sess.ActiveSubagents) == 0 && sess.PendingQuestion == nil {
 			sess.CurrentTool = ""
 			sess.CurrentToolStatus = "Processing results"
 		}
+
+	case "PermissionRequest":
+		sess.Status = models.StatusWaitingPermission
+		qText := "Claude Code is requesting permission to execute an action"
+		reason := payload.Reason
+		if payload.ToolInput != nil {
+			if cmd, ok := payload.ToolInput["command"].(string); ok && cmd != "" {
+				qText = fmt.Sprintf("Execute command: %s", cmd)
+			} else if fp, ok := payload.ToolInput["file_path"].(string); ok && fp != "" {
+				qText = fmt.Sprintf("Modify file: %s", fp)
+			}
+		}
+		if payload.Message != "" {
+			qText = payload.Message
+		}
+
+		sess.PendingQuestion = &models.PendingQuestion{
+			Type:     "permission",
+			Title:    fmt.Sprintf("Permission Required (%s)", payload.ToolName),
+			Question: qText,
+			ToolName: payload.ToolName,
+			Reason:   reason,
+			AskedAt:  time.Now(),
+		}
+		sess.CurrentToolStatus = "Waiting for permission / confirmation"
+		appendLog(fmt.Sprintf("Permission requested: %s", qText))
+		notifTitle = "⚠️ Permission Required"
+		notifBody = qText
+		notifType = "permission"
 
 	case "SubagentStart":
 		subID := payload.ToolUseID
@@ -264,7 +333,7 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		s.subagents[subID] = sub
 		sess.Status = models.StatusSubagentRunning
 		appendLog(fmt.Sprintf("Sub-agent launched: %s (%s)", agentType, desc))
-		notifTitle = "Sub-Agent Active"
+		notifTitle = "🤖 Sub-Agent Active"
 		notifBody = fmt.Sprintf("%s is working on: %s", agentType, desc)
 		notifType = "subagent"
 
@@ -287,23 +356,17 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		sess.Status = models.StatusIdle
 		sess.CurrentTool = ""
 		sess.CurrentToolStatus = "Idling (Ready for prompt)"
+		sess.PendingQuestion = nil
 		sess.ActiveToolIDs = make(map[string]string)
-		appendLog("Turn finished (Idling)")
-		notifTitle = "Claude Code Finished"
-		notifBody = fmt.Sprintf("%s has finished turn and is now idle", sess.ProjectName)
-		notifType = "idle"
-
-	case "PermissionRequest":
-		sess.Status = models.StatusWaitingPermission
-		sess.CurrentToolStatus = "Waiting for permission / confirmation"
-		appendLog("Waiting for user permission")
-		notifTitle = "Permission Required"
-		notifBody = fmt.Sprintf("Claude Code in %s requires your confirmation", sess.ProjectName)
-		notifType = "permission"
+		appendLog("Turn finished (Ready for prompt)")
+		notifTitle = "✅ Task Completed"
+		notifBody = fmt.Sprintf("Claude Code finished working on %s and is ready for your next prompt.", sess.ProjectName)
+		notifType = "task_done"
 
 	case "SessionEnd":
 		sess.Status = models.StatusCompleted
 		sess.CurrentToolStatus = "Session ended"
+		sess.PendingQuestion = nil
 		appendLog("Session closed")
 		notifTitle = "Session Ended"
 		notifBody = fmt.Sprintf("Session %s closed", sess.ProjectName)
@@ -315,9 +378,14 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			msg = payload.NotificationType
 		}
 		appendLog(fmt.Sprintf("Notification: %s", msg))
-		notifTitle = "Claude Code Notification"
+		if payload.NotificationType == "waiting_input" || payload.NotificationType == "permission_prompt" {
+			notifTitle = "⚠️ User Input Required"
+			notifType = "permission"
+		} else {
+			notifTitle = "Claude Code Notification"
+			notifType = "info"
+		}
 		notifBody = msg
-		notifType = "info"
 	}
 
 	s.mu.Unlock()
@@ -419,4 +487,71 @@ func (s *Store) GetAllSubagents() []*models.Subagent {
 		}
 	}
 	return list
+}
+
+// StartLivenessWatcher checks sessions every 1 second to detect task completions and prevent stuck states
+func (s *Store) StartLivenessWatcher() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.checkLivenessAndAutoIdle()
+		}
+	}()
+}
+
+func (s *Store) checkLivenessAndAutoIdle() {
+	s.mu.Lock()
+	var completedSessions []*models.Session
+
+	for _, sess := range s.sessions {
+		// Only inspect sessions that are marked working
+		if sess.Status == models.StatusActive || sess.Status == models.StatusSubagentRunning {
+			// If Claude Code is awaiting user response/permission, do not auto-idle
+			if sess.PendingQuestion != nil || sess.Status == models.StatusWaitingPermission {
+				continue
+			}
+
+			// If last tool/task activity was more than 4 seconds ago
+			if time.Since(sess.LastActivity) >= 4*time.Second {
+				// Mark any stale running subagents as completed
+				for _, sub := range sess.ActiveSubagents {
+					t := time.Now()
+					sub.CompletedAt = &t
+					sub.Status = "completed"
+					sub.CurrentToolStatus = "Completed"
+					sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
+				}
+				sess.ActiveSubagents = make(map[string]*models.Subagent)
+				sess.ActiveToolIDs = make(map[string]string)
+				sess.CurrentTool = ""
+				sess.CurrentToolStatus = "Idling (Ready for prompt)"
+				sess.Status = models.StatusIdle
+				sess.RecentLogs = append([]string{fmt.Sprintf("[%s] Turn finished (Ready for prompt)", time.Now().Format("15:04:05"))}, sess.RecentLogs...)
+				if len(sess.RecentLogs) > 50 {
+					sess.RecentLogs = sess.RecentLogs[:50]
+				}
+
+				completedSessions = append(completedSessions, sess)
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	// Broadcast updates and send Task Completed notifications for each auto-idled session
+	for _, sess := range completedSessions {
+		s.broadcast(models.WebSocketMessage{
+			Type:      "session_update",
+			Data:      sess,
+			Timestamp: time.Now(),
+		})
+
+		s.AddNotification(
+			sess.ID,
+			"✅ Task Completed",
+			fmt.Sprintf("Claude Code finished working on %s and is ready for your next prompt.", sess.ProjectName),
+			"task_done",
+		)
+	}
 }

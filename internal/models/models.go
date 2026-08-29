@@ -8,7 +8,7 @@ type SessionStatus string
 const (
 	StatusActive            SessionStatus = "active"             // Claude Code is actively executing a task/tool
 	StatusIdle              SessionStatus = "idle"               // Claude Code is waiting for user prompt
-	StatusWaitingPermission SessionStatus = "waiting_permission" // Claude Code is waiting for user confirmation/permission
+	StatusWaitingPermission SessionStatus = "waiting_permission" // Claude Code is waiting for user confirmation/permission/input
 	StatusSubagentRunning   SessionStatus = "subagent_running"   // One or more subagents are actively working
 	StatusCompleted         SessionStatus = "completed"          // Session ended
 )
@@ -26,22 +26,34 @@ type Subagent struct {
 	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }
 
+// PendingQuestion represents a question or permission approval Claude Code is currently asking the user
+type PendingQuestion struct {
+	Type     string    `json:"type"` // "permission", "question", "confirmation"
+	Title    string    `json:"title"`
+	Question string    `json:"question"`
+	ToolName string    `json:"tool_name,omitempty"`
+	Options  []string  `json:"options,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
+	AskedAt  time.Time `json:"asked_at"`
+}
+
 // Session represents a tracked Claude Code session
 type Session struct {
-	ID                string                `json:"id"`
-	ProjectName       string                `json:"project_name"`
-	ProjectDir        string                `json:"project_dir"`
-	Status            SessionStatus         `json:"status"`
-	CurrentTool       string                `json:"current_tool"`
-	CurrentToolStatus string                `json:"current_tool_status"`
-	ActiveSubagents   map[string]*Subagent  `json:"active_subagents"`
-	SubagentHistory   []*Subagent           `json:"subagent_history"`
-	ActiveToolIDs     map[string]string     `json:"active_tool_ids"`
-	TranscriptPath    string                `json:"transcript_path"`
-	StartTime         time.Time             `json:"start_time"`
-	LastActivity      time.Time             `json:"last_activity"`
-	LinesProcessed    int                   `json:"lines_processed"`
-	RecentLogs        []string              `json:"recent_logs"`
+	ID                string               `json:"id"`
+	ProjectName       string               `json:"project_name"`
+	ProjectDir        string               `json:"project_dir"`
+	Status            SessionStatus        `json:"status"`
+	CurrentTool       string               `json:"current_tool"`
+	CurrentToolStatus string               `json:"current_tool_status"`
+	PendingQuestion   *PendingQuestion     `json:"pending_question,omitempty"`
+	ActiveSubagents   map[string]*Subagent `json:"active_subagents"`
+	SubagentHistory   []*Subagent          `json:"subagent_history"`
+	ActiveToolIDs     map[string]string    `json:"active_tool_ids"`
+	TranscriptPath    string               `json:"transcript_path"`
+	StartTime         time.Time            `json:"start_time"`
+	LastActivity      time.Time            `json:"last_activity"`
+	LinesProcessed    int                  `json:"lines_processed"`
+	RecentLogs        []string             `json:"recent_logs"`
 }
 
 // HookPayload represents the JSON payload received from Claude Code hooks
@@ -68,7 +80,7 @@ type AppNotification struct {
 	SessionID string    `json:"session_id"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
-	Type      string    `json:"type"` // "working", "idle", "permission", "subagent", "info"
+	Type      string    `json:"type"` // "working", "idle", "permission", "subagent", "info", "task_done"
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -88,9 +100,9 @@ type ServerStateSnapshot struct {
 	Sessions      []*Session         `json:"sessions"`
 	Notifications []*AppNotification `json:"notifications"`
 	SystemSummary struct {
-		TotalSessions    int `json:"total_sessions"`
-		ActiveSessions   int `json:"active_sessions"`
-		ActiveSubagents  int `json:"active_subagents"`
-		WorkingState     bool `json:"working_state"`
+		TotalSessions   int  `json:"total_sessions"`
+		ActiveSessions  int  `json:"active_sessions"`
+		ActiveSubagents int  `json:"active_subagents"`
+		WorkingState    bool `json:"working_state"`
 	} `json:"system_summary"`
 }

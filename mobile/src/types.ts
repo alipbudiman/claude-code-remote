@@ -12,6 +12,16 @@ export interface Subagent {
   completed_at?: string;
 }
 
+export interface PendingQuestion {
+  type: 'permission' | 'question' | 'confirmation';
+  title: string;
+  question: string;
+  tool_name?: string;
+  options?: string[];
+  reason?: string;
+  asked_at: string;
+}
+
 export interface Session {
   id: string;
   project_name: string;
@@ -19,6 +29,7 @@ export interface Session {
   status: SessionStatus;
   current_tool: string;
   current_tool_status: string;
+  pending_question?: PendingQuestion;
   active_subagents: Record<string, Subagent>;
   subagent_history: Subagent[];
   active_tool_ids: Record<string, string>;
@@ -34,7 +45,7 @@ export interface AppNotification {
   session_id: string;
   title: string;
   body: string;
-  type: 'working' | 'idle' | 'permission' | 'subagent' | 'info';
+  type: 'working' | 'idle' | 'permission' | 'subagent' | 'info' | 'task_done';
   timestamp: string;
 }
 

@@ -38,8 +38,10 @@ func main() {
 	port := *portFlag
 	hostIPs := network.GetLocalIPs()
 
-	// 1. Initialize Thread-safe State Store
+	// 1. Initialize Thread-safe State Store & Start Liveness Engine
 	store := state.NewStore(port, hostIPs)
+	store.StartLivenessWatcher()
+	fmt.Println("✅ Task Completion & Liveness auto-checking active (1s polling)")
 
 	// 2. Install Claude Code Hooks automatically
 	if !*noHooksFlag {

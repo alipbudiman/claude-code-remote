@@ -4,6 +4,8 @@ import { StatusHero } from './components/StatusHero';
 import { SubagentInspector } from './components/SubagentInspector';
 import { ActivityLogs } from './components/ActivityLogs';
 import { ConnectionModal } from './components/ConnectionModal';
+import { QuestionPromptBanner } from './components/QuestionPromptBanner';
+import { LiveStreamBar } from './components/LiveStreamBar';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
 import { Session, AppNotification, ServerStateSnapshot, WebSocketMessage } from './types';
@@ -88,7 +90,7 @@ export const App: React.FC = () => {
     if (granted) {
       notificationService.notify(
         'Notifications Enabled',
-        'You will now receive instant alerts on task status.',
+        'You will now receive instant alerts for task completion and user questions.',
         'info'
       );
     }
@@ -98,7 +100,7 @@ export const App: React.FC = () => {
     wsService.setServerUrl(url);
   };
 
-  // Determine working state for Hero Icon
+  // Determine working state for Hero Icon & Live Stream
   const isWorking =
     isConnected &&
     activeSession !== undefined &&
@@ -107,7 +109,7 @@ export const App: React.FC = () => {
       activeSession.status === 'waiting_permission');
 
   return (
-    <div className="min-h-screen bg-[#0d0e12] text-slate-100 flex flex-col font-sans selection:bg-[#D97757]/30 pb-8">
+    <div className="min-h-screen bg-[#0d0e12] text-slate-100 flex flex-col font-sans selection:bg-[#D97757]/30 pb-28">
       {/* Top Header */}
       <Header
         isConnected={isConnected}
@@ -130,6 +132,14 @@ export const App: React.FC = () => {
           </div>
         )}
 
+        {/* 0. Live Question / Permission Callout Banner */}
+        {activeSession?.pending_question && (
+          <QuestionPromptBanner
+            pendingQuestion={activeSession.pending_question}
+            projectName={activeSession.project_name}
+          />
+        )}
+
         {/* 1. Status Hero Monitor with Color/Mono SVG Icons */}
         <StatusHero session={activeSession} isWorking={isWorking} />
 
@@ -142,6 +152,12 @@ export const App: React.FC = () => {
         {/* 3. Real-Time Activity Log */}
         <ActivityLogs logs={logs} notifications={notifications} />
       </main>
+
+      {/* 4. Live Stream Bar / Music-style Agent Monitor */}
+      <LiveStreamBar
+        session={activeSession}
+        isWorking={isWorking}
+      />
 
       {/* Settings Modal */}
       <ConnectionModal
