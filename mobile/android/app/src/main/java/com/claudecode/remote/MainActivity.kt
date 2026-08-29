@@ -16,11 +16,14 @@ import java.io.InputStream
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var notificationHelper: NotificationHelper
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Request POST_NOTIFICATIONS permission on Android 13+
+        notificationHelper = NotificationHelper(this)
+
+        // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -50,6 +53,9 @@ class MainActivity : AppCompatActivity() {
         settings.loadWithOverviewMode = true
         settings.useWideViewPort = true
 
+        // Register Native JavaScript Bridge
+        webView.addJavascriptInterface(WebAppInterface(this), "AndroidBridge")
+
         val assetLoader = WebViewAssetLoader.Builder()
             .setDomain("appassets.androidplatform.net")
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -63,13 +69,12 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val uri = request?.url ?: return null
                 
-                // 1. Try standard WebViewAssetLoader
                 val standardResponse = assetLoader.shouldInterceptRequest(uri)
                 if (standardResponse != null) {
                     return standardResponse
                 }
 
-                // 2. Custom fallback for assets
+                // Custom fallback for assets
                 val path = uri.path?.trimStart('/') ?: return null
                 try {
                     val cleanPath = when {
@@ -112,8 +117,52 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Load via secure custom virtual domain to support ES Modules and CORS
+        // Load via secure custom virtual domain
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+
+        // Initialize persistent ongoing task notification
+        notificationHelper.updateOngoingProgressNotification(
+            "Claude Code",
+            "Waiting for active session",
+            false,
+            false,
+            0
+        )
+    }
+
+    /**
+     * Native JavaScript Interface Bridge
+     */
+    inner class WebAppInterface(private val context: Context) {
+        @JavascriptInterface
+        fun showNotification(title: String, message: String, type: String) {
+            notificationHelper.showPopupAlertNotification(title, message, type)
+        }
+
+        @JavascriptInterface
+        fun updateOngoingNotification(
+            projectName: String,
+            toolStatus: String,
+            isWorking: Boolean,
+            isWaitingInput: Boolean,
+            subagentCount: Int
+        ) {
+            notificationHelper.updateOngoingProgressNotification(
+                projectName,
+                toolStatus,
+                isWorking,
+                isWaitingInput,
+                subagentCount
+            )
+        }
+
+        @JavascriptInterface
+        fun openChromeRemoteDesktop() {
+            notificationHelper.launchChromeRemoteDesktop()
+        }
+
+        @JavascriptInterface
+        fun isNativeAndroid(): Boolean = true
     }
 
     private fun getMimeType(path: String): String {

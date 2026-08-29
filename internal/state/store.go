@@ -263,6 +263,7 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 				sub.CurrentToolStatus = "Completed"
 				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
 				delete(sess.ActiveSubagents, payload.ToolUseID)
+				delete(s.subagents, payload.ToolUseID)
 				appendLog(fmt.Sprintf("Sub-agent finished: %s", sub.Description))
 				notifTitle = "🤖 Sub-Agent Completed"
 				notifBody = fmt.Sprintf("%s finished: %s", sub.AgentType, sub.Description)
@@ -272,6 +273,9 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		if len(sess.ActiveToolIDs) == 0 && len(sess.ActiveSubagents) == 0 && sess.PendingQuestion == nil {
 			sess.CurrentTool = ""
 			sess.CurrentToolStatus = "Processing results"
+		}
+		if len(sess.ActiveSubagents) == 0 && sess.Status == models.StatusSubagentRunning {
+			sess.Status = models.StatusActive
 		}
 
 	case "PermissionRequest":
@@ -337,22 +341,46 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		notifBody = fmt.Sprintf("%s is working on: %s", agentType, desc)
 		notifType = "subagent"
 
-	case "SubagentStop", "TaskCompleted":
+	case "SubagentStop", "TaskCompleted", "TeammateIdle":
 		if payload.ToolUseID != "" {
 			if sub, hasSub := sess.ActiveSubagents[payload.ToolUseID]; hasSub {
 				t := time.Now()
 				sub.CompletedAt = &t
 				sub.Status = "completed"
+				sub.CurrentToolStatus = "Completed"
 				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
 				delete(sess.ActiveSubagents, payload.ToolUseID)
+				delete(s.subagents, payload.ToolUseID)
+				appendLog(fmt.Sprintf("Sub-agent completed: %s", sub.Description))
 			}
+		} else {
+			// Complete all remaining active subagents
+			t := time.Now()
+			for id, sub := range sess.ActiveSubagents {
+				sub.CompletedAt = &t
+				sub.Status = "completed"
+				sub.CurrentToolStatus = "Completed"
+				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
+				delete(s.subagents, id)
+			}
+			sess.ActiveSubagents = make(map[string]*models.Subagent)
+			appendLog("All sub-agents completed tasks")
 		}
-		appendLog("Sub-agent completed task")
 		if len(sess.ActiveSubagents) == 0 {
 			sess.Status = models.StatusActive
 		}
 
 	case "Stop":
+		// Mark all remaining subagents completed and remove from active map
+		t := time.Now()
+		for id, sub := range sess.ActiveSubagents {
+			sub.CompletedAt = &t
+			sub.Status = "completed"
+			sub.CurrentToolStatus = "Completed"
+			sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
+			delete(s.subagents, id)
+		}
+		sess.ActiveSubagents = make(map[string]*models.Subagent)
 		sess.Status = models.StatusIdle
 		sess.CurrentTool = ""
 		sess.CurrentToolStatus = "Idling (Ready for prompt)"

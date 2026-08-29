@@ -1,4 +1,22 @@
-// Notification Service for Android & Mobile Browser
+// Extend window object to recognize native AndroidBridge
+declare global {
+  interface Window {
+    AndroidBridge?: {
+      showNotification: (title: string, message: string, type: string) => void;
+      updateOngoingNotification: (
+        projectName: string,
+        toolStatus: string,
+        isWorking: boolean,
+        isWaitingInput: boolean,
+        subagentCount: number
+      ) => void;
+      openChromeRemoteDesktop: () => void;
+      isNativeAndroid: () => boolean;
+    };
+  }
+}
+
+// Notification Service for Android APK & Mobile Web
 class NotificationService {
   private hasPermission: boolean = false;
   private audioContext: AudioContext | null = null;
@@ -8,6 +26,11 @@ class NotificationService {
   }
 
   public async requestPermission(): Promise<boolean> {
+    if (window.AndroidBridge) {
+      this.hasPermission = true;
+      return true;
+    }
+
     if (!('Notification' in window)) {
       console.warn('Notifications not supported in this browser/webview');
       return false;
@@ -15,7 +38,7 @@ class NotificationService {
 
     try {
       const perm = await Notification.requestPermission();
-      this.hasPermission = (perm === 'granted');
+      this.hasPermission = perm === 'granted';
       return this.hasPermission;
     } catch (e) {
       console.error('Failed to request notification permission', e);
@@ -24,18 +47,35 @@ class NotificationService {
   }
 
   public checkPermission(): boolean {
+    if (window.AndroidBridge) {
+      this.hasPermission = true;
+      return true;
+    }
     if ('Notification' in window) {
-      this.hasPermission = (Notification.permission === 'granted');
+      this.hasPermission = Notification.permission === 'granted';
     }
     return this.hasPermission;
   }
 
-  public notify(title: string, body: string, type: 'working' | 'idle' | 'permission' | 'subagent' | 'info' | 'task_done' = 'info') {
-    // 1. Play haptic feedback vibration on Android
+  public notify(
+    title: string,
+    body: string,
+    type: 'working' | 'idle' | 'permission' | 'subagent' | 'info' | 'task_done' = 'info'
+  ) {
+    // 1. Send to Native Android Notification Manager if inside APK
+    if (window.AndroidBridge && typeof window.AndroidBridge.showNotification === 'function') {
+      try {
+        window.AndroidBridge.showNotification(title, body, type);
+      } catch (e) {
+        console.error('AndroidBridge notification error', e);
+      }
+    }
+
+    // 2. Play haptic feedback vibration on Android
     if ('vibrate' in navigator) {
       if (type === 'permission') {
-        // Urgent alert pattern for user input
-        navigator.vibrate([150, 80, 150, 80, 300]);
+        // Urgent alert pattern for user input / asking
+        navigator.vibrate([200, 100, 200, 100, 400]);
       } else if (type === 'task_done') {
         // Double success buzz
         navigator.vibrate([100, 50, 150]);
@@ -46,24 +86,68 @@ class NotificationService {
       }
     }
 
-    // 2. Play audio chime
+    // 3. Play audio chime
     this.playChime(type);
 
-    // 3. System / Local Notification
-    if (this.hasPermission && 'Notification' in window) {
+    // 4. Web Local Notification fallback
+    if (!window.AndroidBridge && this.hasPermission && 'Notification' in window) {
       try {
         const notif = new Notification(title, {
           body,
-          icon: type === 'working' || type === 'permission' ? '/assets/claudecode-color.svg' : '/assets/claudecode.svg',
-          badge: '/assets/claudecode.svg',
+          icon:
+            type === 'working' || type === 'permission'
+              ? './assets/claudecode-color.svg'
+              : './assets/claudecode.svg',
+          badge: './assets/claudecode.svg',
           tag: 'claude-status-' + Date.now(),
         });
 
         setTimeout(() => notif.close(), 7000);
       } catch (e) {
-        console.warn('Native notification failed, falling back to in-app toast', e);
+        console.warn('Native web notification failed', e);
       }
     }
+  }
+
+  /**
+   * Updates the persistent ongoing notification in the Android notification shade (Task/Progress Bar)
+   */
+  public updateOngoingTaskBar(
+    projectName: string,
+    toolStatus: string,
+    isWorking: boolean,
+    isWaitingInput: boolean,
+    subagentCount: number
+  ) {
+    if (window.AndroidBridge && typeof window.AndroidBridge.updateOngoingNotification === 'function') {
+      try {
+        window.AndroidBridge.updateOngoingNotification(
+          projectName,
+          toolStatus,
+          isWorking,
+          isWaitingInput,
+          subagentCount
+        );
+      } catch (e) {
+        console.error('Failed to update ongoing Android notification', e);
+      }
+    }
+  }
+
+  /**
+   * Launches Chrome Remote Desktop app or web URL
+   */
+  public launchChromeRemoteDesktop() {
+    if (window.AndroidBridge && typeof window.AndroidBridge.openChromeRemoteDesktop === 'function') {
+      try {
+        window.AndroidBridge.openChromeRemoteDesktop();
+        return;
+      } catch (e) {
+        console.error('AndroidBridge CRD launch failed', e);
+      }
+    }
+    // Fallback to browser URL
+    window.open('https://remotedesktop.google.com/access', '_blank');
   }
 
   private playChime(type: string) {
@@ -90,10 +174,10 @@ class NotificationService {
 
         osc.frequency.setValueAtTime(440, now);
         osc.frequency.setValueAtTime(659.25, now + 0.12);
-        gain.gain.setValueAtTime(0.12, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+        gain.gain.setValueAtTime(0.18, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
         osc.start(now);
-        osc.stop(now + 0.4);
+        osc.stop(now + 0.45);
       } else if (type === 'task_done') {
         // Celebration finished chime (C5 -> E5 -> G5)
         const osc = this.audioContext.createOscillator();
@@ -104,12 +188,11 @@ class NotificationService {
         osc.frequency.setValueAtTime(523.25, now);
         osc.frequency.setValueAtTime(659.25, now + 0.1);
         osc.frequency.setValueAtTime(783.99, now + 0.2);
-        gain.gain.setValueAtTime(0.1, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+        gain.gain.setValueAtTime(0.12, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
         osc.start(now);
-        osc.stop(now + 0.45);
+        osc.stop(now + 0.5);
       } else if (type === 'working' || type === 'subagent') {
-        // Working started chime
         const osc = this.audioContext.createOscillator();
         const gain = this.audioContext.createGain();
         osc.connect(gain);
@@ -117,12 +200,11 @@ class NotificationService {
 
         osc.frequency.setValueAtTime(587.33, now);
         osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
-        gain.gain.setValueAtTime(0.07, now);
+        gain.gain.setValueAtTime(0.08, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
         osc.start(now);
         osc.stop(now + 0.25);
       } else {
-        // Soft idle note
         const osc = this.audioContext.createOscillator();
         const gain = this.audioContext.createGain();
         osc.connect(gain);

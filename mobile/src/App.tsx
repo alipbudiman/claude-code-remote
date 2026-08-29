@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { StatusHero } from './components/StatusHero';
+import { ChromeRemoteButton } from './components/ChromeRemoteButton';
 import { SubagentInspector } from './components/SubagentInspector';
 import { ActivityLogs } from './components/ActivityLogs';
 import { ConnectionModal } from './components/ConnectionModal';
@@ -84,6 +85,29 @@ export const App: React.FC = () => {
     }
   };
 
+  // Determine working state for Hero Icon & Live Stream
+  const isWorking =
+    isConnected &&
+    activeSession !== undefined &&
+    (activeSession.status === 'active' ||
+      activeSession.status === 'subagent_running' ||
+      activeSession.status === 'waiting_permission');
+
+  const isWaitingInput =
+    activeSession?.status === 'waiting_permission' || activeSession?.pending_question !== undefined;
+
+  // Sync with persistent ongoing Android notification bar
+  useEffect(() => {
+    const subCount = Object.keys(activeSession?.active_subagents || {}).length;
+    notificationService.updateOngoingTaskBar(
+      activeSession?.project_name || 'Claude Code',
+      activeSession?.current_tool_status || (isWorking ? 'Executing tools...' : 'Ready for next prompt'),
+      isWorking,
+      isWaitingInput,
+      subCount
+    );
+  }, [activeSession, isWorking, isWaitingInput]);
+
   const handleRequestNotifications = async () => {
     const granted = await notificationService.requestPermission();
     setHasNotificationPerm(granted);
@@ -99,14 +123,6 @@ export const App: React.FC = () => {
   const handleSaveUrl = (url: string) => {
     wsService.setServerUrl(url);
   };
-
-  // Determine working state for Hero Icon & Live Stream
-  const isWorking =
-    isConnected &&
-    activeSession !== undefined &&
-    (activeSession.status === 'active' ||
-      activeSession.status === 'subagent_running' ||
-      activeSession.status === 'waiting_permission');
 
   return (
     <div className="min-h-screen bg-[#0d0e12] text-slate-100 flex flex-col font-sans selection:bg-[#D97757]/30 pb-28">
@@ -143,17 +159,20 @@ export const App: React.FC = () => {
         {/* 1. Status Hero Monitor with Color/Mono SVG Icons */}
         <StatusHero session={activeSession} isWorking={isWorking} />
 
-        {/* 2. Sub-Agent Live Inspector */}
+        {/* 2. Chrome Remote Desktop Quick Launcher (Above Sub-Agents) */}
+        <ChromeRemoteButton isWaitingInput={isWaitingInput} />
+
+        {/* 3. Sub-Agent Live Inspector */}
         <SubagentInspector
           activeSubagents={activeSession?.active_subagents || {}}
           subagentHistory={activeSession?.subagent_history || []}
         />
 
-        {/* 3. Real-Time Activity Log */}
+        {/* 4. Real-Time Activity Log */}
         <ActivityLogs logs={logs} notifications={notifications} />
       </main>
 
-      {/* 4. Live Stream Bar / Music-style Agent Monitor */}
+      {/* 5. Live Stream Bar / Music-style Agent Monitor */}
       <LiveStreamBar
         session={activeSession}
         isWorking={isWorking}

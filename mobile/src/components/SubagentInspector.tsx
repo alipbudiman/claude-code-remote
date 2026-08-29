@@ -11,7 +11,9 @@ export const SubagentInspector: React.FC<SubagentInspectorProps> = ({
   activeSubagents,
   subagentHistory,
 }) => {
-  const activeList = Object.values(activeSubagents || {});
+  const activeList = Object.values(activeSubagents || {}).filter(
+    (s) => s && s.status === 'running'
+  );
   const historyList = subagentHistory || [];
 
   return (
