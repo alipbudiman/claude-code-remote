@@ -55,9 +55,7 @@ jobs:
       - name: Build Android APK with Gradle
         working-directory: mobile/android
         run: |
-          gradle wrapper --gradle-version 8.6 --distribution-type bin
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          gradle assembleDebug --stacktrace --no-daemon
 
       - name: Prepare APK Output
         run: |
