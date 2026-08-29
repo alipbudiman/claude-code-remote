@@ -7,4 +7,16 @@
         <item name="android:statusBarColor">#0D0E12</item>
         <item name="android:navigationBarColor">#0D0E12</item>
     </style>
+
+    <style name="AppTheme.Dialog" parent="Theme.MaterialComponents.DayNight.Dialog.Alert">
+        <item name="colorPrimary">#D97757</item>
+        <item name="colorAccent">#D97757</item>
+        <item name="android:textColorPrimary">#E0E0E0</item>
+        <item name="android:windowBackground">#1A1C24</item>
+        <item name="buttonBarPositiveButtonStyle">@style/AppTheme.Dialog.PositiveButton</item>
+    </style>
+
+    <style name="AppTheme.Dialog.PositiveButton" parent="Widget.MaterialComponents.Button.TextButton.Dialog">
+        <item name="android:textColor">#D97757</item>
+    </style>
 </resources>

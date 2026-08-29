@@ -17,11 +17,13 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var notificationHelper: NotificationHelper
+    private lateinit var batteryHelper: BatteryOptimizationHelper
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         notificationHelper = NotificationHelper(this)
+        batteryHelper = BatteryOptimizationHelper(this)
 
         // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -39,6 +41,34 @@ class MainActivity : AppCompatActivity() {
         setContentView(webView)
 
         setupWebView()
+
+        // Show first-launch battery optimization dialog (only once per install)
+        batteryHelper.showFirstLaunchDialogIfNeeded()
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        // Every time the app is resumed, check battery optimization status
+        // and show a warning notification if still restricted
+        batteryHelper.showBatteryWarningNotificationIfNeeded()
+
+        // Push battery status to the WebView so the frontend banner can update
+        pushBatteryStatusToWebView()
+    }
+
+    /**
+     * Injects the current battery optimization status into the WebView
+     * so the React frontend can render its in-app banner accordingly.
+     */
+    private fun pushBatteryStatusToWebView() {
+        val isUnrestricted = batteryHelper.isIgnoringBatteryOptimizations()
+        webView.post {
+            webView.evaluateJavascript(
+                "if(window.__onBatteryStatusUpdate){window.__onBatteryStatusUpdate($isUnrestricted);}",
+                null
+            )
+        }
     }
 
     private fun setupWebView() {
@@ -104,6 +134,12 @@ class MainActivity : AppCompatActivity() {
                 super.onReceivedError(view, request, error)
                 Log.e("ClaudeRemote", "WebView error: ${error?.description} for ${request?.url}")
             }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Push battery status once the page has fully loaded
+                pushBatteryStatusToWebView()
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -163,6 +199,14 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun isNativeAndroid(): Boolean = true
+
+        @JavascriptInterface
+        fun isBatteryUnrestricted(): Boolean = batteryHelper.isIgnoringBatteryOptimizations()
+
+        @JavascriptInterface
+        fun openBatterySettings() {
+            batteryHelper.openBatteryOptimizationSettings()
+        }
     }
 
     private fun getMimeType(path: String): String {

@@ -7,6 +7,7 @@ import { ActivityLogs } from './components/ActivityLogs';
 import { ConnectionModal } from './components/ConnectionModal';
 import { QuestionPromptBanner } from './components/QuestionPromptBanner';
 import { LiveStreamBar } from './components/LiveStreamBar';
+import { BatteryBanner } from './components/BatteryBanner';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
 import { Session, AppNotification, ServerStateSnapshot, WebSocketMessage } from './types';
@@ -148,7 +149,10 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* 0. Live Question / Permission Callout Banner */}
+        {/* 0a. Battery Optimization Warning Banner */}
+        <BatteryBanner />
+
+        {/* 0b. Live Question / Permission Callout Banner */}
         {activeSession?.pending_question && (
           <QuestionPromptBanner
             pendingQuestion={activeSession.pending_question}

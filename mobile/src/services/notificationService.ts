@@ -12,7 +12,10 @@ declare global {
       ) => void;
       openChromeRemoteDesktop: () => void;
       isNativeAndroid: () => boolean;
+      isBatteryUnrestricted: () => boolean;
+      openBatterySettings: () => void;
     };
+    __onBatteryStatusUpdate?: (isUnrestricted: boolean) => void;
   }
 }
 
