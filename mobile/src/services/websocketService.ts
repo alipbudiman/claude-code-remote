@@ -12,16 +12,28 @@ class WebSocketService {
   private isConnecting: boolean = false;
 
   constructor() {
-    const savedUrl = localStorage.getItem('claude_server_url');
+    let savedUrl: string | null = null;
+    try {
+      savedUrl = localStorage.getItem('claude_server_url');
+    } catch {
+      // Storage access exception safe
+    }
+
     if (savedUrl) {
       this.serverUrl = savedUrl;
     } else {
-      // Default to origin if served from Go server, or standard localhost:9280
       const origin = window.location.origin;
-      if (origin && !origin.includes('localhost:3000') && !origin.includes('127.0.0.1:3000')) {
+      if (
+        origin &&
+        !origin.includes('localhost:3000') &&
+        !origin.includes('127.0.0.1:3000') &&
+        !origin.includes('appassets.androidplatform.net') &&
+        !origin.includes('file://') &&
+        (origin.startsWith('http://') || origin.startsWith('https://'))
+      ) {
         this.serverUrl = origin;
       } else {
-        this.serverUrl = 'http://127.0.0.1:9280';
+        this.serverUrl = 'http://192.168.100.48:9280';
       }
     }
   }
@@ -36,7 +48,11 @@ class WebSocketService {
       url = 'http://' + url;
     }
     this.serverUrl = url;
-    localStorage.setItem('claude_server_url', url);
+    try {
+      localStorage.setItem('claude_server_url', url);
+    } catch {
+      // Storage safe
+    }
     this.reconnect();
   }
 
