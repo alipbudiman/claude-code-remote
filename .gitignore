@@ -1,0 +1,15 @@
+# Node / Mobile
+mobile/node_modules/
+mobile/.vite/
+mobile/android/app/build/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/local.properties
+
+# Go
+*.exe~
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

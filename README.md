@@ -1,2 +1,151 @@
-# CLAUDE CODE SESSION REMOTE
+# Claude Code Remote Session Monitor (Go Server EXE & Android APK)
 
+Aplikasi remote monitoring sesi dan sub-agent untuk [Claude Code](https://github.com/anthropics/claude-code) berbasis **Go Server Executable (Desktop)** dan **Android Application (APK)**. Sistem ini bekerja 100% pada jaringan lokal (**Local LAN / Wi-Fi**) melalui port `0.0.0.0:9280`, sehingga **tidak memerlukan kuota internet** untuk komunikasi antara PC dan HP Android.
+
+Dibuat berdasarkan analisis arsitektur event-driven & hook system dari [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents).
+
+---
+
+## Fitur Utama
+
+1. **Desktop Server (Go Executable `claude-remote-server.exe`)**:
+   - Ditulis dalam bahasa **Go** (kinerja tinggi, single binary `.exe` tanpa dependensi runtime).
+   - Membuka koneksi `0.0.0.0:9280` sehingga bisa diakses dari perangkat manapun di jaringan Wi-Fi/LAN lokal yang sama.
+   - Mendeteksi alamat IP lokal (misal: `http://192.168.100.48:9280`) dan mencetak **QR Code ASCII** di konsol terminal untuk koneksi instan dari HP Android.
+   - **Auto-Hook Installer**: Mengintegrasikan hook secara otomatis ke `~/.claude/settings.json` (`SessionStart`, `SessionEnd`, `Stop`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `TeammateIdle`, `TaskCompleted`).
+   - **JSONL Redundancy Watcher**: Memantau file transcript di `~/.claude/projects/` dan `subagents/` secara real-time.
+   - **Embedded Web Dashboard**: Jika diakses via browser laptop/PC, langsung membuka dashboard status interaktif.
+
+2. **Android Application (APK)**:
+   - **Read-Only Dashboard**: Dirancang khusus untuk monitor di HP Android tanpa perlu input manual.
+   - **Status Icon Dinamis**:
+     - 🎨 **Sedang Bekerja / Active**: Menggunakan icon berwarna [`icon/claudecode-color.svg`](icon/claudecode-color.svg) dengan animasi efek glow/pulse.
+     - 💤 **Sedang Diam / Idling**: Menggunakan icon monokrom [`icon/claudecode.svg`](icon/claudecode.svg).
+   - **Sub-Agent Activity Inspector**: Memantau seluruh sub-agent yang sedang berjalan, peran sub-agent (misal: `Bug-Fixer`, `Task-Agent`), aktivitas spesifik yang sedang dilakukan (misal: `Reading config.go`, `Running: go test`, `Editing app.vue`), durasi waktu, serta riwayat sub-task yang telah selesai.
+   - **Notifikasi Android Lokal**: Memunculkan notifikasi pop-up, getar (*vibration*), dan nada notifikasi lembut saat Claude Code mulai bekerja, selesai giliran (*turn finished*), meminta izin (*permission request*), atau saat sub-agent selesai.
+
+3. **Otomatisasi CI/CD GitHub Actions**:
+   - `.github/workflows/build-apk.yml`: Otomatis meng-compile APK dari repositori GitHub dan menerbitkan rilis APK siap download di HP Android.
+   - `.github/workflows/build-server.yml`: Otomatis meng-compile binary Go untuk Windows (`.exe`), Linux, dan macOS.
+
+---
+
+## Struktur Proyek
+
+```
+claude-status-apk/
+├── .github/
+│   └── workflows/
+│       ├── build-apk.yml          # GitHub Actions workflow untuk build Android APK
+│       └── build-server.yml       # GitHub Actions workflow untuk build Go binaries
+├── bin/
+│   └── claude-remote-server.exe   # Compiled executable Go desktop server
+├── cmd/
+│   └── server/
+│       └── main.go                # Entry point Go application
+├── internal/
+│   ├── api/                       # HTTP Server, WebSocket Hub, REST endpoints
+│   ├── hooks/                     # Claude hook installer & tool status parser
+│   ├── models/                    # Data models (Session, Subagent, Notification)
+│   ├── network/                   # Local IP detection & QR Code generator
+│   ├── state/                     # Thread-safe in-memory state store
+│   └── watcher/                   # JSONL transcript file watcher
+├── mobile/                        # Android Mobile Application codebase
+│   ├── android/                   # Native Android Gradle configuration & WebView runner
+│   ├── src/                       # React/TypeScript mobile interface
+│   │   ├── assets/                # claudecode-color.svg & claudecode.svg
+│   │   ├── components/            # Header, StatusHero, SubagentInspector, ActivityLogs
+│   │   └── services/              # Notification & WebSocket services
+│   └── package.json
+├── web/                           # Embedded Web UI Dashboard
+│   ├── index.html
+│   └── web.go
+├── scripts/
+│   ├── build-go.bat               # Script kompilasi Go .exe untuk Windows
+│   ├── run-server.bat             # Script menjalankan server di Windows
+│   └── test-mock-hook.ps1         # Script pengujian hook event tiruan
+├── icon/
+│   ├── claudecode-color.svg       # Icon status working
+│   └── claudecode.svg             # Icon status idling
+├── go.mod
+└── README.md
+```
+
+---
+
+## Panduan Penggunaan
+
+### 1. Menjalankan Server di Komputer (Windows)
+
+#### Menggunakan Binary yang Sudah Dikompilasi:
+Cukup jalankan script batch atau file executable:
+```cmd
+scripts\run-server.bat
+```
+Atau langsung jalankan binary:
+```cmd
+bin\claude-remote-server.exe
+```
+
+#### Mengompilasi Ulang Binary Go:
+Jika Anda ingin mengompilasi ulang kode sumber Go:
+```cmd
+scripts\build-go.bat
+```
+Atau via terminal Go:
+```bash
+go build -ldflags="-s -w" -o bin/claude-remote-server.exe ./cmd/server
+```
+
+Saat server berjalan, terminal akan menampilkan alamat IP lokal dan QR Code:
+```
+========================================================================
+   ____ _                 _         ____          _      
+  / ___| | __ _ _   _  __| | ___   / ___|___   __| | ___ 
+ | |   | |/ _` | | | |/ _` |/ _ \ | |   / _ \ / _` |/ _ \
+ | |___| | (_| | |_| | (_| |  __/ | |__| (_) | (_| |  __/
+  \____|_|\__,_|\__,_|\__,_|\___|  \____\___/ \__,_|\___|
+  
+          REMOTE SESSION & SUB-AGENT MONITOR (GO EXE)
+========================================================================
+✅ Claude Code Hooks successfully linked to ~/.claude/settings.json
+✅ JSONL Transcript file watcher active on ~/.claude/projects/
+
+------------------------------------------------------------------------
+🚀 Server running on 0.0.0.0:9280 (Local LAN / Offline Wi-Fi)
+   Available Network Addresses:
+   • http://192.168.100.48:9280
+   • http://localhost:9280 (Local Desktop Browser)
+------------------------------------------------------------------------
+```
+
+---
+
+### 2. Menginstal & Menghubungkan Aplikasi Android (APK)
+
+#### Opsi A: Download APK Otomatis dari GitHub Releases
+1. Buka repositori GitHub Anda di HP Android: [https://github.com/alipbudiman/claude-code-remote/releases](https://github.com/alipbudiman/claude-code-remote/releases)
+2. Download file `claude-remote.apk`.
+3. Install file APK di HP Android Anda.
+
+#### Opsi B: Membuka Langsung via Browser HP (PWA/Webview)
+1. Pastikan HP Android Anda terhubung ke jaringan Wi-Fi yang sama dengan PC.
+2. Buka browser di HP Android (Chrome/Firefox) dan ketik alamat IP yang muncul di terminal (misal: `http://192.168.100.48:9280`).
+3. Tekan **"Add to Home Screen"** untuk memasangnya seperti aplikasi native.
+
+#### Menghubungkan ke Server:
+1. Buka aplikasi di HP Android.
+2. Jika belum otomatis terhubung, klik tombol **Settings (ikon gear/WiFi)** di pojok kanan atas.
+3. Masukkan IP PC Anda (contoh: `http://192.168.100.48:9280`) lalu klik **Connect Server**.
+4. Tekan ikon **Lonceng (Bell)** untuk mengaktifkan izin notifikasi getar & pop-up di HP Anda.
+
+---
+
+### 3. Menguji Sistem
+
+Untuk melakukan simulasi event Claude Code (memulai tool, memunculkan sub-agent, dan menyelesaikan giliran), Anda dapat menjalankan script simulasi di PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\test-mock-hook.ps1
+```
+
+Status di HP Android Anda akan langsung berubah secara real-time disertai notifikasi!

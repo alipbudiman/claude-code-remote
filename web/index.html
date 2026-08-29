@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Claude Code Remote Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0d0e12;
+      --card-bg: rgba(22, 24, 31, 0.85);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #D97757;
+      --accent-glow: rgba(217, 119, 87, 0.25);
+      --accent-hover: #e88666;
+      --text: #f4f4f6;
+      --text-muted: #8b8f9e;
+      --text-dim: #5c6070;
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.2);
+      --warning: #f59e0b;
+      --warning-glow: rgba(245, 158, 11, 0.2);
+      --idle: #64748b;
+      --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'Fira Code', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(217, 119, 87, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 85% 85%, rgba(16, 185, 129, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.6) 0%, transparent 100%);
+      color: var(--text);
+      font-family: var(--font-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Top Navigation */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(13, 14, 18, 0.85);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--card-border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    .brand-icon svg {
+      width: 28px;
+      height: 28px;
+    }
+
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.03);
+      transition: all 0.3s ease;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--idle);
+      transition: all 0.3s ease;
+    }
+
+    .status-pill.active {
+      border-color: rgba(217, 119, 87, 0.4);
+      background: var(--accent-glow);
+      color: #ffaa88;
+    }
+
+    .status-pill.active .status-dot {
+      background: var(--accent);
+      box-shadow: 0 0 10px var(--accent);
+      animation: pulse 1.5s infinite;
+    }
+
+    .status-pill.idle {
+      border-color: rgba(100, 116, 139, 0.3);
+      color: #94a3b8;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.25); }
+    }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.5rem;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 900px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Cards */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.14);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.25rem;
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* Hero Monitor Panel */
+    .hero-monitor {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 2.5rem 1.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-icon-container {
+      position: relative;
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--card-border);
+      transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    .hero-icon-container.working {
+      background: var(--accent-glow);
+      border-color: rgba(217, 119, 87, 0.5);
+      box-shadow: 0 0 40px rgba(217, 119, 87, 0.35);
+      animation: workingGlow 2.5s infinite alternate;
+    }
+
+    @keyframes workingGlow {
+      from { box-shadow: 0 0 20px rgba(217, 119, 87, 0.2); }
+      to { box-shadow: 0 0 45px rgba(217, 119, 87, 0.45); }
+    }
+
+    .hero-icon-container svg {
+      width: 64px;
+      height: 64px;
+      transition: all 0.3s ease;
+    }
+
+    .hero-status-tag {
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 0.3rem 0.9rem;
+      border-radius: 9999px;
+      margin-bottom: 0.75rem;
+    }
+
+    .hero-status-tag.working {
+      background: var(--accent-glow);
+      color: #ffaa88;
+      border: 1px solid rgba(217, 119, 87, 0.4);
+    }
+
+    .hero-status-tag.idle {
+      background: rgba(100, 116, 139, 0.15);
+      color: #94a3b8;
+      border: 1px solid rgba(100, 116, 139, 0.3);
+    }
+
+    .hero-tool-desc {
+      font-size: 1.35rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      max-width: 90%;
+      word-break: break-word;
+      line-height: 1.35;
+    }
+
+    .hero-project-name {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: var(--font-mono);
+    }
+
+    /* Sub-Agent Section */
+    .subagent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .subagent-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 12px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .subagent-card::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      background: var(--accent);
+    }
+
+    .subagent-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .subagent-role {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .subagent-badge {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      font-weight: 600;
+    }
+
+    .subagent-activity {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .subagent-time {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 2.5rem 1rem;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      border: 1px dashed rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+    }
+
+    /* Logs & Activity Feed */
+    .log-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      max-height: 280px;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+    }
+
+    .log-list::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .log-list::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+
+    .log-item {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.03);
+      color: #cbd5e1;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+    }
+
+    .log-time {
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    /* Sidebar Panels */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .qr-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 0.75rem;
+    }
+
+    .qr-image {
+      width: 180px;
+      height: 180px;
+      border-radius: 12px;
+      background: #ffffff;
+      padding: 8px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    .ip-badge {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(217, 119, 87, 0.1);
+      border: 1px solid rgba(217, 119, 87, 0.25);
+      padding: 0.35rem 0.75rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .ip-badge:hover {
+      background: rgba(217, 119, 87, 0.2);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.25rem;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      width: 100%;
+      border: none;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #D97757 0%, #c46243 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 15px rgba(217, 119, 87, 0.3);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #e88666 0%, #D97757 100%);
+      box-shadow: 0 6px 20px rgba(217, 119, 87, 0.45);
+      transform: translateY(-1px);
+    }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--card-border);
+      color: var(--text);
+    }
+
+    .btn-outline:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon" id="headerIcon">
+        <!-- SVG injected by JS -->
+      </div>
+      <div>
+        <h1>Claude Code Remote</h1>
+        <div style="font-size: 0.75rem; color: var(--text-dim);">Local LAN Monitor</div>
+      </div>
+    </div>
+    <div class="status-pill idle" id="mainStatusPill">
+      <div class="status-dot"></div>
+      <span id="mainStatusText">IDLING</span>
+    </div>
+  </header>
+
+  <main>
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      
+      <!-- Live Hero Monitor -->
+      <div class="card hero-monitor">
+        <div class="hero-icon-container" id="heroIconContainer">
+          <div id="heroIcon">
+            <!-- Dynamic SVG (claudecode-color.svg or claudecode.svg) -->
+          </div>
+        </div>
+        <div class="hero-status-tag idle" id="heroStatusTag">IDLING</div>
+        <div class="hero-tool-desc" id="heroToolDesc">Ready for next prompt</div>
+        <div class="hero-project-name" id="heroProject">
+          <span style="color: var(--text-dim);">📁</span>
+          <span id="heroProjectName">No active session</span>
+        </div>
+      </div>
+
+      <!-- Sub-Agent Inspector -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🤖</span> Active Sub-Agents (<span id="subagentCount">0</span>)
+          </div>
+        </div>
+        <div id="subagentContainer">
+          <div class="empty-state">No sub-agents currently running</div>
+        </div>
+      </div>
+
+      <!-- Live Tool / Session Log -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>⚡</span> Real-Time Activity Log
+          </div>
+        </div>
+        <div class="log-list" id="logList">
+          <div class="log-item">
+            <span class="log-time">[Ready]</span>
+            <span>Server listening on 0.0.0.0. Waiting for Claude Code hook events...</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Sidebar Info -->
+    <div class="sidebar">
+      
+      <!-- Connect Mobile (QR & IP) -->
+      <div class="card qr-box">
+        <div class="card-title" style="align-self: flex-start;">
+          <span>📱</span> Android APK Connect
+        </div>
+        <p style="font-size: 0.8rem; color: var(--text-muted);">
+          Scan QR from Android APK or open URL in your phone browser:
+        </p>
+        <img class="qr-image" id="qrCodeImg" src="/api/qr" alt="Connection QR Code">
+        <div class="ip-badge" id="primaryIpBadge" title="Click to copy">
+          http://127.0.0.1:9280
+        </div>
+        <p style="font-size: 0.75rem; color: var(--text-dim);">
+          Must be connected to the same Wi-Fi / LAN
+        </p>
+      </div>
+
+      <!-- GitHub APK Download -->
+      <div class="card" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <div class="card-title">
+          <span>📦</span> Android APK Build
+        </div>
+        <p style="font-size: 0.8rem; color: var(--text-muted);">
+          Download the latest compiled APK directly from your GitHub repository:
+        </p>
+        <a href="https://github.com/alipbudiman/claude-code-remote/releases" target="_blank" class="btn btn-primary">
+          📥 Download APK Release
+        </a>
+        <a href="https://github.com/alipbudiman/claude-code-remote/actions" target="_blank" class="btn btn-outline">
+          ⚙️ GitHub Actions CI/CD
+        </a>
+      </div>
+
+    </div>
+  </main>
+
+  <script>
+    // Embedded SVGs matching icon/claudecode-color.svg and icon/claudecode.svg
+    const SVG_COLOR = `<svg height="100%" style="flex:none;line-height:1" viewBox="0 0 24 24" width="100%" xmlns="http://www.w3.org/2000/svg"><title>Claude Code</title><path clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" fill="#D97757" fill-rule="evenodd"></path></svg>`;
+    const SVG_MONO = `<svg fill="#64748b" fill-rule="evenodd" height="100%" style="flex:none;line-height:1" viewBox="0 0 24 24" width="100%" xmlns="http://www.w3.org/2000/svg"><title>Claude Code</title><path clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"></path></svg>`;
+
+    // Elements
+    const headerIcon = document.getElementById('headerIcon');
+    const heroIcon = document.getElementById('heroIcon');
+    const heroIconContainer = document.getElementById('heroIconContainer');
+    const mainStatusPill = document.getElementById('mainStatusPill');
+    const mainStatusText = document.getElementById('mainStatusText');
+    const heroStatusTag = document.getElementById('heroStatusTag');
+    const heroToolDesc = document.getElementById('heroToolDesc');
+    const heroProjectName = document.getElementById('heroProjectName');
+    const subagentContainer = document.getElementById('subagentContainer');
+    const subagentCount = document.getElementById('subagentCount');
+    const logList = document.getElementById('logList');
+    const primaryIpBadge = document.getElementById('primaryIpBadge');
+
+    let currentWorkingState = false;
+
+    function renderStatus(isWorking, toolDesc, projectName) {
+      currentWorkingState = isWorking;
+      if (isWorking) {
+        headerIcon.innerHTML = SVG_COLOR;
+        heroIcon.innerHTML = SVG_COLOR;
+        heroIconContainer.className = 'hero-icon-container working';
+        mainStatusPill.className = 'status-pill active';
+        mainStatusText.innerText = 'WORKING';
+        heroStatusTag.className = 'hero-status-tag working';
+        heroStatusTag.innerText = 'WORKING ON TASK';
+      } else {
+        headerIcon.innerHTML = SVG_MONO;
+        heroIcon.innerHTML = SVG_MONO;
+        heroIconContainer.className = 'hero-icon-container';
+        mainStatusPill.className = 'status-pill idle';
+        mainStatusText.innerText = 'IDLING';
+        heroStatusTag.className = 'hero-status-tag idle';
+        heroStatusTag.innerText = 'IDLING';
+      }
+
+      if (toolDesc) heroToolDesc.innerText = toolDesc;
+      if (projectName) heroProjectName.innerText = projectName;
+    }
+
+    // Initialize Default State
+    renderStatus(false, 'Waiting for Claude Code task...', 'Local Server Ready');
+
+    // Render Subagents
+    function renderSubagents(subagentsMap) {
+      const subs = Object.values(subagentsMap || {});
+      subagentCount.innerText = subs.length;
+
+      if (subs.length === 0) {
+        subagentContainer.innerHTML = `<div class="empty-state">No sub-agents currently running</div>`;
+        return;
+      }
+
+      subagentContainer.innerHTML = `
+        <div class="subagent-grid">
+          ${subs.map(sub => `
+            <div class="subagent-card">
+              <div class="subagent-header">
+                <span class="subagent-role">${sub.agent_type || 'Sub-Agent'}</span>
+                <span class="subagent-badge">${sub.status || 'running'}</span>
+              </div>
+              <div class="subagent-activity">${sub.current_tool_status || sub.description || 'Active'}</div>
+              <div class="subagent-time">Started: ${new Date(sub.started_at).toLocaleTimeString()}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    // Append Log
+    function appendLogItem(time, message) {
+      const item = document.createElement('div');
+      item.className = 'log-item';
+      item.innerHTML = `<span class="log-time">[${time}]</span><span>${message}</span>`;
+      logList.insertBefore(item, logList.firstChild);
+      while (logList.children.length > 50) {
+        logList.removeChild(logList.lastChild);
+      }
+    }
+
+    // Connect WebSocket
+    function initWebSocket() {
+      const loc = window.location;
+      const wsUri = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/ws';
+      const ws = new WebSocket(wsUri);
+
+      ws.onopen = () => {
+        console.log('[Remote Monitor] Connected to WebSocket');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'initial_state') {
+            handleInitialState(msg.data);
+          } else if (msg.type === 'session_update') {
+            handleSessionUpdate(msg.data);
+          } else if (msg.type === 'subagent_update') {
+            // Updated subagent
+          } else if (msg.type === 'notification') {
+            const notif = msg.data;
+            appendLogItem(new Date(notif.timestamp).toLocaleTimeString(), `${notif.title}: ${notif.body}`);
+            // Browser Notification API
+            if (Notification.permission === 'granted') {
+              new Notification(notif.title, { body: notif.body });
+            }
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('[Remote Monitor] WebSocket closed. Retrying in 2s...');
+        setTimeout(initWebSocket, 2000);
+      };
+    }
+
+    function handleInitialState(state) {
+      if (state.host_ips && state.host_ips.length > 0) {
+        const ip = state.host_ips[0];
+        primaryIpBadge.innerText = `http://${ip}:${state.port}`;
+      }
+
+      if (state.active_session) {
+        handleSessionUpdate(state.active_session);
+      }
+
+      if (state.notifications && state.notifications.length > 0) {
+        logList.innerHTML = '';
+        state.notifications.forEach(n => {
+          appendLogItem(new Date(n.timestamp).toLocaleTimeString(), `${n.title}: ${n.body}`);
+        });
+      }
+    }
+
+    function handleSessionUpdate(sess) {
+      const isWorking = (sess.status === 'active' || sess.status === 'subagent_running' || sess.status === 'waiting_permission');
+      renderStatus(isWorking, sess.current_tool_status, sess.project_name || sess.project_dir);
+      renderSubagents(sess.active_subagents);
+    }
+
+    // Request Notification permission
+    if ('Notification' in window && Notification.permission === 'default') {
+      document.body.addEventListener('click', () => {
+        Notification.requestPermission();
+      }, { once: true });
+    }
+
+    // Copy IP on badge click
+    primaryIpBadge.addEventListener('click', () => {
+      navigator.clipboard.writeText(primaryIpBadge.innerText);
+      const prev = primaryIpBadge.innerText;
+      primaryIpBadge.innerText = 'Copied to clipboard!';
+      setTimeout(() => { primaryIpBadge.innerText = prev; }, 1500);
+    });
+
+    initWebSocket();
+  </script>
+</body>
+</html>

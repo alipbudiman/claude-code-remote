@@ -1,0 +1,87 @@
+name: Build & Release Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install Mobile Dependencies & Build Frontend
+        working-directory: mobile
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: Copy Web Dist to Android Assets
+        run: |
+          mkdir -p mobile/android/app/src/main/assets
+          cp -r mobile/dist/* mobile/android/app/src/main/assets/
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build Android APK with Gradle
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew || gradle wrapper
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Prepare APK Output
+        run: |
+          mkdir -p release-apk
+          find mobile/android/app/build/outputs/apk -name "*.apk" -exec cp {} release-apk/claude-remote.apk \;
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-remote-android-apk
+          path: release-apk/claude-remote.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release (Optional for Tags & Manual Dispatch)
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-apk/claude-remote.apk
+          name: Claude Remote APK ${{ github.ref_name }}
+          body: |
+            ## Claude Code Remote Monitor Android APK
+            
+            - Real-time Claude Code session & sub-agent tracking
+            - Offline Local LAN Wi-Fi connection
+            - Push / Sound Notifications for active tasks and turn completion
+            - Working vs Idling visual indicators
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

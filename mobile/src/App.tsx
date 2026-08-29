@@ -1,0 +1,158 @@
+import React, { useState, useEffect } from 'react';
+import { Header } from './components/Header';
+import { StatusHero } from './components/StatusHero';
+import { SubagentInspector } from './components/SubagentInspector';
+import { ActivityLogs } from './components/ActivityLogs';
+import { ConnectionModal } from './components/ConnectionModal';
+import { wsService } from './services/websocketService';
+import { notificationService } from './services/notificationService';
+import { Session, AppNotification, ServerStateSnapshot, WebSocketMessage } from './types';
+
+export const App: React.FC = () => {
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [hasNotificationPerm, setHasNotificationPerm] = useState<boolean>(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [activeSession, setActiveSession] = useState<Session | undefined>();
+  const [hostIps, setHostIps] = useState<string[]>([]);
+  const [serverPort, setServerPort] = useState<number>(9280);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Check initial notification status
+    setHasNotificationPerm(notificationService.checkPermission());
+
+    // Connection listener
+    const unsubConn = wsService.onConnectionChange((connected) => {
+      setIsConnected(connected);
+      if (connected) {
+        // Fetch initial snapshot on connect
+        wsService.fetchStatus().then((snap) => {
+          if (snap) handleSnapshot(snap);
+        });
+      }
+    });
+
+    // Message listener
+    const unsubMsg = wsService.onMessage((msg: WebSocketMessage) => {
+      handleWebSocketMessage(msg);
+    });
+
+    // Start WebSocket
+    wsService.connect();
+
+    return () => {
+      unsubConn();
+      unsubMsg();
+    };
+  }, []);
+
+  const handleSnapshot = (snap: ServerStateSnapshot) => {
+    setHostIps(snap.host_ips || []);
+    setServerPort(snap.port || 9280);
+    setActiveSession(snap.active_session);
+    setNotifications(snap.notifications || []);
+    if (snap.active_session?.recent_logs) {
+      setLogs(snap.active_session.recent_logs);
+    }
+  };
+
+  const handleWebSocketMessage = (msg: WebSocketMessage) => {
+    switch (msg.type) {
+      case 'initial_state':
+        handleSnapshot(msg.data as ServerStateSnapshot);
+        break;
+
+      case 'session_update': {
+        const sess = msg.data as Session;
+        setActiveSession(sess);
+        if (sess.recent_logs) {
+          setLogs(sess.recent_logs);
+        }
+        break;
+      }
+
+      case 'notification': {
+        const notif = msg.data as AppNotification;
+        setNotifications((prev) => [notif, ...prev.slice(0, 49)]);
+        // Trigger mobile push & chime
+        notificationService.notify(notif.title, notif.body, notif.type);
+        break;
+      }
+    }
+  };
+
+  const handleRequestNotifications = async () => {
+    const granted = await notificationService.requestPermission();
+    setHasNotificationPerm(granted);
+    if (granted) {
+      notificationService.notify(
+        'Notifications Enabled',
+        'You will now receive instant alerts on task status.',
+        'info'
+      );
+    }
+  };
+
+  const handleSaveUrl = (url: string) => {
+    wsService.setServerUrl(url);
+  };
+
+  // Determine working state for Hero Icon
+  const isWorking =
+    isConnected &&
+    activeSession !== undefined &&
+    (activeSession.status === 'active' ||
+      activeSession.status === 'subagent_running' ||
+      activeSession.status === 'waiting_permission');
+
+  return (
+    <div className="min-h-screen bg-[#0d0e12] text-slate-100 flex flex-col font-sans selection:bg-[#D97757]/30 pb-8">
+      {/* Top Header */}
+      <Header
+        isConnected={isConnected}
+        isWorking={isWorking}
+        hasNotificationPerm={hasNotificationPerm}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onRequestNotifications={handleRequestNotifications}
+      />
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-lg w-full mx-auto px-4 pt-4 space-y-4">
+        {/* Offline Warning Banner */}
+        {!isConnected && (
+          <div
+            onClick={() => setIsSettingsOpen(true)}
+            className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center justify-between cursor-pointer animate-pulse"
+          >
+            <span>Connecting to PC ({wsService.getServerUrl()})...</span>
+            <span className="underline">Change IP</span>
+          </div>
+        )}
+
+        {/* 1. Status Hero Monitor with Color/Mono SVG Icons */}
+        <StatusHero session={activeSession} isWorking={isWorking} />
+
+        {/* 2. Sub-Agent Live Inspector */}
+        <SubagentInspector
+          activeSubagents={activeSession?.active_subagents || {}}
+          subagentHistory={activeSession?.subagent_history || []}
+        />
+
+        {/* 3. Real-Time Activity Log */}
+        <ActivityLogs logs={logs} notifications={notifications} />
+      </main>
+
+      {/* Settings Modal */}
+      <ConnectionModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        currentUrl={wsService.getServerUrl()}
+        hostIps={hostIps}
+        port={serverPort}
+        onSaveUrl={handleSaveUrl}
+      />
+    </div>
+  );
+};
+export default App;
