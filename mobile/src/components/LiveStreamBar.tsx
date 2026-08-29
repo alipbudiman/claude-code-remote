@@ -75,7 +75,7 @@ export const LiveStreamBar: React.FC<LiveStreamBarProps> = ({
                 <img
                   src={isWorking || isWaitingInput ? ColorIcon : MonoIcon}
                   alt="Stream Icon"
-                  className={`w-6 h-6 object-contain ${isWorking ? 'animate-[spin_6s_linear_infinite]' : ''}`}
+                  className={`w-6 h-6 object-contain ${isWorking ? 'animate-bounce' : ''}`}
                 />
               </div>
 
@@ -178,8 +178,8 @@ export const LiveStreamBar: React.FC<LiveStreamBarProps> = ({
               <div className="relative w-20 h-20 rounded-full flex items-center justify-center bg-[#D97757]/15 border border-[#D97757]/40 mb-3 shadow-[0_0_30px_rgba(217,119,87,0.3)]">
                 <img
                   src={isWorking ? ColorIcon : MonoIcon}
-                  alt="Stream Vinyl"
-                  className={`w-12 h-12 object-contain ${isWorking ? 'animate-[spin_8s_linear_infinite]' : ''}`}
+                  alt="Stream Icon"
+                  className={`w-12 h-12 object-contain ${isWorking ? 'animate-bounce' : ''}`}
                 />
               </div>
 

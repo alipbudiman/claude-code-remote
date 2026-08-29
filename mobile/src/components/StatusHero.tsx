@@ -24,7 +24,7 @@ export const StatusHero: React.FC<StatusHeroProps> = ({ session, isWorking }) =>
         return {
           text: 'WORKING ON TASK',
           color: 'bg-[#D97757]/20 text-[#ffaa88] border-[#D97757]/40 shadow-[0_0_15px_rgba(217,119,87,0.25)]',
-          icon: <Sparkles size={13} className="animate-spin text-[#D97757]" />,
+          icon: <Sparkles size={13} className="animate-pulse text-[#D97757]" />,
         };
       case 'subagent_running':
         return {
