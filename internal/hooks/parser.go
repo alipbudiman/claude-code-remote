@@ -126,8 +126,11 @@ func FormatToolStatus(toolName string, input map[string]interface{}) string {
 	case "AskUserQuestion", "ask_question":
 		return "Waiting for user input"
 
-	case "EnterPlanMode":
+	case "EnterPlanMode", "enter_plan_mode":
 		return "Planning task steps"
+
+	case "ExitPlanMode", "exit_plan_mode":
+		return "Plan ready, waiting for review (ExitPlanMode)"
 
 	case "NotebookEdit":
 		return "Editing notebook"

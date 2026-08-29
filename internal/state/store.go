@@ -222,6 +222,19 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			notifTitle = "❓ Claude Code Question"
 			notifBody = qText
 			notifType = "permission"
+		} else if payload.ToolName == "ExitPlanMode" || payload.ToolName == "exit_plan_mode" {
+			sess.Status = models.StatusWaitingPermission
+			qText := "Claude Code has completed the implementation plan and is requesting your review/approval to begin execution."
+			sess.PendingQuestion = &models.PendingQuestion{
+				Type:     "question",
+				Title:    "📋 Plan Ready for Review (ExitPlanMode)",
+				Question: qText,
+				ToolName: payload.ToolName,
+				AskedAt:  time.Now(),
+			}
+			notifTitle = "📋 Plan Ready for Review (ExitPlanMode)"
+			notifBody = "Claude Code completed planning and is waiting for your review in the terminal."
+			notifType = "permission"
 		} else if payload.ToolName == "Task" || payload.ToolName == "Agent" || payload.ToolName == "invoke_subagent" {
 			sess.Status = models.StatusSubagentRunning
 			subID := payload.ToolUseID
