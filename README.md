@@ -119,6 +119,40 @@ Saat server berjalan, terminal akan menampilkan alamat IP lokal dan QR Code:
 ------------------------------------------------------------------------
 ```
 
+#### Auto-Start saat Login Windows (`-install`)
+
+Server adalah aplikasi console. "Survive reboot" berarti "mulai otomatis saat
+login pengguna" — bukan Windows Service — karena Claude Code (sumber event)
+berjalan di sesi pengguna, jadi service SYSTEM tidak memberi keuntungan apa pun
+dibanding task yang dipicu login.
+
+```cmd
+:: Dari terminal Administrator (registrasi task ONLOGON memerlukan elevasi;
+:: tanpa elevasi schtasks menjawab "Access is denied")
+bin\claude-remote-server.exe -install
+
+:: Verifikasi task terdaftar
+schtasks /Query /TN ClaudeRemoteServer
+
+:: Hapus autostart kapan saja (boleh dari terminal biasa)
+bin\claude-remote-server.exe -uninstall
+```
+
+- `-install` mendaftarkan Scheduled Task `ClaudeRemoteServer` via `schtasks`
+  (`/SC ONLOGON /RL LIMITED /F`) yang menjalankan:
+  `"<path-exe>" -port 9280 -log-file "%USERPROFILE%\.claude\claude-remote-server.log"`.
+- `-log-file` menyalin semua log diagnostik ke file tersebut (di samping
+  stdout); file otomatis dirotasi ke `.1` bila melebihi 5MB.
+- Menutup jendela console (tombol X), logoff, dan shutdown memicu jalur
+  graceful shutdown (offset watcher disimpan; durasi dibatasi ~3 detik).
+- Peluncuran ganda pada port yang sama tidak fatal: instance kedua
+  mendeteksi instance pertama via `GET /api/health` lalu keluar dengan kode 0.
+- Batas hidup: tracking hanya ada selama Claude Code berjalan di sesi
+  pengguna — PC sleep / belum login = tidak ada yang bisa dilacak.
+- Alternatif "service sejati" dengan restart-on-crash: pemilik dapat membungkus
+  EXE ini dengan WinSW atau NSSM (didokumentasikan sebagai opsi saja, tidak
+  dibangun di repo ini).
+
 ---
 
 ### 2. Menginstal & Menghubungkan Aplikasi Android (APK)

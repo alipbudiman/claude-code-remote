@@ -55,6 +55,9 @@ type Store struct {
 	// eventLog, when set, durably records every accepted hook payload (see
 	// durable.go). Optional so tests and non-durable use stay untouched.
 	eventLog *EventLog
+	// lastEventAt is the time the most recent hook event was accepted;
+	// surfaced by /api/health. Zero means "no event yet".
+	lastEventAt time.Time
 }
 
 // NewStore initializes an empty state store with the default liveness timeout.
@@ -298,6 +301,10 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			log.Printf("event log append failed: %v", err)
 		}
 	}
+
+	// /api/health's last_event_at: stamp every accepted event (the watcher
+	// replay-dup return above already exited, so this really is accepted).
+	s.lastEventAt = time.Now()
 
 	var notifTitle, notifBody, notifType string
 
@@ -686,6 +693,14 @@ func (s *Store) GetSnapshot() models.ServerStateSnapshot {
 	snap.SystemSummary.WorkingState = workingState
 
 	return snap
+}
+
+// LastEventAt returns the time the most recent hook event was accepted
+// (zero if none has arrived yet). Guarded by the store mutex.
+func (s *Store) LastEventAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastEventAt
 }
 
 // GetAllSubagents returns all active & historical subagents

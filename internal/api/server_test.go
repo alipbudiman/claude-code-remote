@@ -1,6 +1,9 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -272,5 +275,169 @@ func TestHookPostWithBearerTokenReturns200(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /api/hook status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// --- M3 3.5: GET /api/health (token-gated) ---
+
+// healthResponse mirrors the documented /api/health JSON contract.
+type healthResponse struct {
+	Status      string     `json:"status"`
+	Version     string     `json:"version"`
+	UptimeS     int64      `json:"uptime_s"`
+	LastEventAt *time.Time `json:"last_event_at"`
+}
+
+// M3: /api/health without a token -> 401 (same auth gate as the other APIs).
+func TestHealthWithoutTokenReturns401(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/health")
+	if err != nil {
+		t.Fatalf("GET /api/health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/health without token = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// M3: /api/health with a token -> 200 and the documented fields; last_event_at
+// is null before any hook event has been accepted.
+func TestHealthWithTokenReturnsFields(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/health status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var h healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		t.Fatalf("decode /api/health body: %v", err)
+	}
+	if h.Status != "ok" {
+		t.Fatalf("status = %q, want %q", h.Status, "ok")
+	}
+	if h.Version != "1.0.0" {
+		t.Fatalf("version = %q, want %q", h.Version, "1.0.0")
+	}
+	if h.UptimeS < 0 {
+		t.Fatalf("uptime_s = %d, want >= 0", h.UptimeS)
+	}
+	if h.LastEventAt != nil {
+		t.Fatalf("last_event_at before any event = %v, want null", *h.LastEventAt)
+	}
+}
+
+// M3: after a hook event is accepted, last_event_at becomes a real timestamp.
+func TestHealthLastEventAtAfterHookEvent(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	postEvent(t, ts.URL, `{"hook_event_name":"SessionStart","session_id":"health-1","cwd":"d:\\x"}`)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var h healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		t.Fatalf("decode /api/health body: %v", err)
+	}
+	if h.LastEventAt == nil {
+		t.Fatal("last_event_at after an accepted event = null, want timestamp")
+	}
+}
+
+// postEvent sends one hook event with the bearer token and asserts 200.
+func postEvent(t *testing.T, baseURL, body string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", baseURL+"/api/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/hook: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/hook status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// --- M3 3.6: handleHookPost must zero payload.Source ---
+
+// M3 hardening: a token-holding HTTP caller posting source:"replay" must NOT
+// be able to impersonate the boot replay channel (which would silently bypass
+// the durable event log and heads-up notifications). The handler forces
+// Source to "" so every HTTP delivery is treated as a live event.
+func TestHookPostZeroesSpoofedSource(t *testing.T) {
+	store := state.NewStore(0, nil)
+	srv := NewServer(0, store, web.EmbeddedFS, nil, testToken)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	postEvent(t, ts.URL, `{"hook_event_name":"SessionStart","session_id":"spoof-1","cwd":"d:\\x","source":"replay"}`)
+
+	// Live SessionStart events raise a notification; a real source:"replay"
+	// would not. Zeroing the field must make this delivery behave as live.
+	snap := store.GetSnapshot()
+	if len(snap.Notifications) != 1 {
+		t.Fatalf("notifications after spoofed source:\"replay\" = %d, want 1 (must be treated as a live event)", len(snap.Notifications))
+	}
+	if store.LastEventAt().IsZero() {
+		t.Fatal("LastEventAt not updated for an HTTP-delivered event")
+	}
+}
+
+// --- M3 3.3: Start/Shutdown round-trip ---
+
+// M3: Shutdown drains the underlying http.Server; Start then returns
+// http.ErrServerClosed instead of an arbitrary error.
+func TestStartShutdownRoundTrip(t *testing.T) {
+	srv := NewServer(0, state.NewStore(0, nil), web.EmbeddedFS, nil, testToken)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start() }()
+
+	// Let the listener bind (port 0 picks an ephemeral port we cannot learn).
+	time.Sleep(250 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("Start returned %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after Shutdown")
+	}
+}
+
+// M3: Shutdown is a no-op (nil error) when the server was never started.
+func TestShutdownWithoutStartIsNoop(t *testing.T) {
+	srv := NewServer(0, state.NewStore(0, nil), web.EmbeddedFS, nil, testToken)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown before Start = %v, want nil", err)
 	}
 }

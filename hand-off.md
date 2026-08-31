@@ -793,15 +793,35 @@ git push origin v1.0.0
 ### Server Deployment on PC
 
 ```powershell
-# Option 1: Run directly
+# Option 1: Run directly (foreground console; Ctrl+C or closing the console
+# window triggers a bounded graceful shutdown)
 bin\claude-remote-server.exe -port 9280
 
 # Option 2: Use script
 scripts\run-server.bat
 
-# Option 3: Run as background process
-Start-Process -WindowStyle Hidden bin\claude-remote-server.exe -ArgumentList "-port","9280"
+# Option 3 (recommended): logon autostart via -install.
+# NOTE: registering an ONLOGON task requires an ELEVATED (Administrator)
+# console — a normal console gets "Access is denied" from schtasks.
+bin\claude-remote-server.exe -install        # registers Scheduled Task "ClaudeRemoteServer"
+schtasks /Query /TN ClaudeRemoteServer       # verify it is registered
+bin\claude-remote-server.exe -uninstall      # remove the autostart (normal console is fine)
 ```
+
+The registered task runs:
+`"<exe-path>" -port 9280 -log-file "%USERPROFILE%\.claude\claude-remote-server.log"`
+
+**Logon semantics & lifetime ceiling:** the task starts at the user's logon —
+not as a boot-time SYSTEM service — because Claude Code (the event source)
+runs in the user session, so a SYSTEM service would buy nothing over a
+logon-triggered task. Tracking can only exist while Claude Code runs: PC
+sleep or a logged-off session means there is nothing to track. A duplicate
+launch on the same port is harmless — the second instance probes
+`GET /api/health`, sees another instance of this server, and exits 0. Closing
+the console window / logoff / shutdown runs a graceful path bounded to ~3s
+(the durable event log, not this path, is the real durability story). Owners
+wanting a true service with restart-on-crash can wrap the EXE with WinSW or
+NSSM — a documented alternative only, not built in this repo.
 
 ---
 

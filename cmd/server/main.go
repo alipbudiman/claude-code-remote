@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,23 +25,60 @@ import (
 
 const banner = `
 ========================================================================
-   ____ _                 _         ____          _      
-  / ___| | __ _ _   _  __| | ___   / ___|___   __| | ___ 
+   ____ _                 _         ____          _
+  / ___| | __ _ _   _  __| | ___   / ___|___   __| | ___
  | |   | |/ _` + "`" + ` | | | |/ _` + "`" + ` |/ _ \ | |   / _ \ / _` + "`" + ` |/ _ \
  | |___| | (_| | |_| | (_| |  __/ | |__| (_) | (_| |  __/
-  \____|_|\__,_|\__,_|\__,_|\___|  \____\___/ \__,_|\___|
-  
+  \____|_|\__,_|\__,_|\__,_|\___|  \____\___/ \__,_|\___/
+
           REMOTE SESSION & SUB-AGENT MONITOR (GO EXE)
 ========================================================================`
 
+// diagf prints a startup diagnostic line. It defaults to plain stdout; once
+// file logging is enabled it is rerouted through log.Printf so diagnostics
+// also land in the log file. The QR banner and the connectivity block are
+// display output, not diagnostics, and stay on stdout only.
+var diagf = func(format string, a ...interface{}) {
+	fmt.Printf(format+"\n", a...)
+}
+
 func main() {
 	portFlag := flag.Int("port", 9280, "Port for local server to listen on (binds to 0.0.0.0)")
+	installFlag := flag.Bool("install", false, "Register a logon Scheduled Task (auto-start at sign-in), then exit")
+	uninstallFlag := flag.Bool("uninstall", false, "Remove the logon Scheduled Task, then exit")
 	noHooksFlag := flag.Bool("no-hooks", false, "Disable auto-installation of Claude Code hooks")
 	noWatchFlag := flag.Bool("no-watch", false, "Disable JSONL transcript file watcher")
 	idleTimeoutFlag := flag.String("idle-timeout", "300s", "How long a session may receive no hook events before it is marked stalled (e.g. 300s, 2m30s)")
+	logFileFlag := flag.String("log-file", "", "Also write log output to this file (rotates to <path>.1 past 5MB; default: stdout only)")
 	flag.Parse()
 
+	// Lifecycle-management flags never run the server.
+	if *installFlag {
+		if err := installScheduledTask(*portFlag); err != nil {
+			log.Fatalf("Fatal: -install failed: %v", err)
+		}
+		return // exit 0
+	}
+	if *uninstallFlag {
+		uninstallScheduledTask()
+		return // exit 0
+	}
+
 	fmt.Println(banner)
+
+	// 0. Optional file logging: stdout stays as-is (MultiWriter), and the
+	// diagnostics below switch from fmt.Printf to log.Printf so they are
+	// captured in the file. An oversized existing file rotates to <path>.1.
+	if *logFileFlag != "" {
+		f, err := openLogFile(*logFileFlag, maxLogFileSize)
+		if err != nil {
+			log.Fatalf("Fatal: could not open log file %s: %v", *logFileFlag, err)
+		}
+		defer f.Close()
+		log.SetOutput(io.MultiWriter(os.Stdout, f))
+		diagf = log.Printf
+		diagf("✅ Logging to %s (rotates to %s.1 past 5MB)", *logFileFlag, *logFileFlag)
+	}
 
 	idleTimeout, err := time.ParseDuration(*idleTimeoutFlag)
 	if err != nil {
@@ -64,42 +106,42 @@ func main() {
 	eventLog := state.NewEventLog(durableDir)
 	store.SetEventLog(eventLog)
 	if replayed, err := eventLog.Replay(store.HandleHookEvent); err != nil {
-		fmt.Printf("⚠️  Warning: event-log replay failed: %v\n", err)
+		diagf("⚠️  Warning: event-log replay failed: %v", err)
 	} else if replayed > 0 {
-		fmt.Printf("✅ Replayed %d events from the last 24h of %s\n", replayed, eventLog.Path())
+		diagf("✅ Replayed %d events from the last 24h of %s", replayed, eventLog.Path())
 	}
 	if drained, err := state.DrainSpool(durableDir, store.HandleHookEvent); err != nil {
-		fmt.Printf("⚠️  Warning: spool drain failed: %v\n", err)
+		diagf("⚠️  Warning: spool drain failed: %v", err)
 	} else if drained > 0 {
-		fmt.Printf("✅ Drained %d spooled hook events (delivered as real notifications)\n", drained)
+		diagf("✅ Drained %d spooled hook events (delivered as real notifications)", drained)
 	}
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			if _, err := state.DrainSpool(durableDir, store.HandleHookEvent); err != nil {
-				fmt.Printf("⚠️  Warning: spool drain failed: %v\n", err)
+				diagf("⚠️  Warning: spool drain failed: %v", err)
 			}
 		}
 	}()
 
 	// 1b. Liveness Fallback Engine
 	store.StartLivenessWatcher()
-	fmt.Printf("✅ Event-driven turn tracking active; liveness fallback auto-checks every 1s (stall after %s of silence)\n", idleTimeout)
+	diagf("✅ Event-driven turn tracking active; liveness fallback auto-checks every 1s (stall after %s of silence)", idleTimeout)
 
 	// 2. Load (or create) the shared-secret auth token guarding /api/* and /ws
 	token, err := auth.LoadOrCreateToken()
 	if err != nil {
 		log.Fatalf("Fatal: could not load or create auth token: %v", err)
 	}
-	fmt.Println("✅ Auth token loaded from ~/.claude/claude-remote-token (required by all /api/* and /ws requests)")
+	diagf("✅ Auth token loaded from ~/.claude/claude-remote-token (required by all /api/* and /ws requests)")
 
 	// 3. Install Claude Code Hooks automatically
 	if !*noHooksFlag {
 		if err := hooks.InstallClaudeHooks(port); err != nil {
-			fmt.Printf("⚠️  Warning: Failed to install Claude hooks: %v\n", err)
+			diagf("⚠️  Warning: Failed to install Claude hooks: %v", err)
 		} else {
-			fmt.Println("✅ Claude Code Hooks successfully linked to ~/.claude/settings.json")
+			diagf("✅ Claude Code Hooks successfully linked to ~/.claude/settings.json")
 		}
 	}
 
@@ -108,8 +150,8 @@ func main() {
 	if !*noWatchFlag {
 		fw = watcher.NewTranscriptWatcher(store)
 		fw.Start()
-		defer fw.Stop() // best effort; the signal path below stops it explicitly
-		fmt.Println("✅ JSONL Transcript file watcher active on ~/.claude/projects/")
+		defer fw.Stop() // best effort; the shutdown paths below stop it explicitly
+		diagf("✅ JSONL Transcript file watcher active on ~/.claude/projects/")
 	}
 
 	// 5. Print Connectivity & QR Code (URL carries the auth token so a
@@ -139,24 +181,59 @@ func main() {
 	// 6. Initialize & Start API Server (after replay & spool drain)
 	srv := api.NewServer(port, store, web.EmbeddedFS, hostIPs, token)
 
-	// Graceful shutdown handling
+	// 7. Graceful shutdown: Ctrl+C / SIGTERM (signal.Notify) and the Windows
+	// console-close events (installConsoleHandler) all funnel into ONE
+	// bounded path — persist watcher offsets, drain in-flight HTTP (~3s),
+	// exit — so a console window close or logoff no longer loses up to 30s
+	// of transcript offsets. M2's per-event durable log remains the real
+	// durability story; this path only saves offsets and closes cleanly.
+	var shutdownOnce sync.Once
+	gracefulShutdown := func() {
+		shutdownOnce.Do(func() {
+			diagf("🛑 Shutting down Claude Remote Server (graceful; bounded to ~3s)...")
+			// os.Exit skips main's defers, so the watcher must be stopped
+			// HERE. Stop() persists offsets; sync.Once makes the deferred
+			// double-call a no-op.
+			if fw != nil {
+				fw.Stop()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(ctx); err != nil {
+				log.Printf("graceful shutdown did not complete in time: %v", err)
+			}
+			os.Exit(0)
+		})
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		<-sigChan
-		fmt.Println("\n🛑 Shutting down Claude Code Remote Server...")
-		// os.Exit skips main's defers, so the watcher must be stopped HERE
-		// or up to 30s of transcript offsets are lost. Stop() persists
-		// offsets; sync.Once makes the deferred double-call a no-op.
-		if fw != nil {
-			fw.Stop()
-		}
-		os.Exit(0)
+		gracefulShutdown()
 	}()
 
-	fmt.Println("📡 Listening for Claude Code sessions & sub-agents... (Press Ctrl+C to stop)")
+	// Windows console-close (X button), logoff and shutdown arrive as
+	// CTRL_CLOSE/LOGOFF/SHUTDOWN events signal.Notify never sees. No-op on
+	// other platforms.
+	if err := installConsoleHandler(gracefulShutdown); err != nil {
+		diagf("⚠️  Warning: could not install console-close handler: %v", err)
+	}
+
+	diagf("📡 Listening for Claude Code sessions & sub-agents... (Press Ctrl+C to stop)")
 	if err := srv.Start(); err != nil {
+		if errors.Is(err, http.ErrServerClosed) {
+			// Shutdown() already drained the listener; a clean stop, not an
+			// error. (gracefulShutdown normally exits before we get here.)
+			os.Exit(0)
+		}
+		// Bind failure: if the port owner answers /api/health with our
+		// ServerVersion it is another instance of this server — a duplicate
+		// launch that must exit cleanly instead of crashing.
+		if isOurInstance(fmt.Sprintf("http://127.0.0.1:%d", port), token) {
+			log.Printf("another Claude Remote Server instance is already running on port %d; exiting", port)
+			os.Exit(0)
+		}
 		log.Fatalf("Fatal: Server error: %v", err)
 	}
 }

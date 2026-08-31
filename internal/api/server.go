@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -19,6 +20,11 @@ import (
 	"claude-remote-server/internal/state"
 )
 
+// ServerVersion identifies this server build. The single-instance guard and
+// /api/health use it to tell our server apart from whatever else may be
+// listening on the port.
+const ServerVersion = "1.0.0"
+
 // androidWebViewOrigin is the Origin the Android APK WebView sends for every
 // request (it serves the bundled dashboard from this virtual https origin).
 const androidWebViewOrigin = "https://appassets.androidplatform.net"
@@ -32,18 +38,24 @@ type Server struct {
 	hostIPs    []string
 	token      string
 	upgrader   websocket.Upgrader
+
+	// httpServer is created by Start() so Shutdown() can drain it.
+	httpServer *http.Server
+	// uptimeStart anchors /api/health's uptime_s.
+	uptimeStart time.Time
 }
 
 // NewServer initializes an API server with all routes configured. The token
 // is the shared secret required by every /api/* endpoint and the /ws upgrade.
 func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []string, token string) *Server {
 	s := &Server{
-		port:       port,
-		store:      store,
-		embeddedFS: embeddedFS,
-		mux:        http.NewServeMux(),
-		hostIPs:    hostIPs,
-		token:      token,
+		port:        port,
+		store:       store,
+		embeddedFS:  embeddedFS,
+		mux:         http.NewServeMux(),
+		hostIPs:     hostIPs,
+		token:       token,
+		uptimeStart: time.Now(),
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -80,6 +92,7 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("/api/subagents", apiGate(s.handleSubagents))
 	s.mux.Handle("/api/qr", apiGate(s.handleQRCode))
 	s.mux.Handle("/api/install-hooks", apiGate(s.handleInstallHooks))
+	s.mux.Handle("/api/health", apiGate(s.handleHealth))
 
 	// 4. Embedded Web UI Dashboard (static HTML only, no data — ungated)
 	s.mux.HandleFunc("/", s.handleStaticWeb)
@@ -177,6 +190,14 @@ func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
+
+	// Source is an INTERNAL trust marker ("" = live hook, "watcher" = JSONL
+	// watcher, "replay" = boot replay) that decides durable-log appends and
+	// whether heads-up notifications fire. A token-holding HTTP caller must
+	// never set it — a spoofed source:"replay" would silently bypass the
+	// durable event log and notifications. Force it to "" so every HTTP
+	// delivery is treated as a live event.
+	payload.Source = ""
 
 	s.store.HandleHookEvent(payload)
 
@@ -287,8 +308,45 @@ func (s *Server) handleStaticWeb(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// Start runs the HTTP server on 0.0.0.0:<port>
+// handleHealth serves the token-gated liveness endpoint used by watchdogs and
+// the single-instance guard. last_event_at is null until the first hook event
+// is accepted.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	lastEvent := s.store.LastEventAt()
+
+	resp := struct {
+		Status      string     `json:"status"`
+		Version     string     `json:"version"`
+		UptimeS     int64      `json:"uptime_s"`
+		LastEventAt *time.Time `json:"last_event_at"`
+	}{
+		Status:  "ok",
+		Version: ServerVersion,
+		UptimeS: int64(time.Since(s.uptimeStart) / time.Second),
+	}
+	if !lastEvent.IsZero() {
+		t := lastEvent
+		resp.LastEventAt = &t
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Start runs the HTTP server on 0.0.0.0:<port>. It returns http.ErrServerClosed
+// after Shutdown() drains the server; any other error means the listener
+// failed (e.g. the port is already bound).
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("0.0.0.0:%d", s.port)
-	return http.ListenAndServe(addr, s.mux)
+	s.httpServer = &http.Server{Addr: addr, Handler: s.mux}
+	return s.httpServer.ListenAndServe()
+}
+
+// Shutdown gracefully drains in-flight requests (bounded by ctx) and closes
+// the listeners. It is a no-op when the server was never started.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.httpServer == nil {
+		return nil
+	}
+	return s.httpServer.Shutdown(ctx)
 }
