@@ -13,3 +13,10 @@ mobile/android/local.properties
 # OS
 .DS_Store
 Thumbs.db
+
+CLAUDE.md
+.instructions/
+hand-off.md
+
+# Agent scratch
+.superpowers/
