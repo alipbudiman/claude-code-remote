@@ -172,6 +172,10 @@ func TestRelayPeerJoinedAnnouncement(t *testing.T) {
 	if ts, ok := msg["timestamp"]; !ok || ts == nil {
 		t.Fatalf("peer_joined frame has no timestamp: %q", data)
 	}
+	// The control frame carries exactly type+timestamp — no data field.
+	if _, hasData := msg["data"]; hasData {
+		t.Fatalf("peer_joined frame must not carry a data field: %q", data)
+	}
 }
 
 // 4. /health is open (Railway health check); /ws demands a valid 64-hex token.

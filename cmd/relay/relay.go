@@ -21,8 +21,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"claude-remote-server/internal/models"
 )
 
 const (
@@ -174,6 +172,14 @@ func (s *relayServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// peerJoinedMsg is the relay-control frame announcing a new room member. It
+// deliberately does NOT reuse models.WebSocketMessage: that type's Data field
+// lacks omitempty and would render a misleading "data":null into the frame.
+type peerJoinedMsg struct {
+	Type      string    `json:"type"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // relayPeer is one authenticated member connection. All writes funnel through
 // writeMu (gorilla allows one concurrent writer), each bounded by
 // wsWriteTimeout.
@@ -217,7 +223,7 @@ func (s *relayServer) join(p *relayPeer) {
 	log.Printf("relay: join room=%s members=%d rooms=%d", roomTag(p.room), s.memberCount(p.room), s.roomCount())
 
 	if len(others) > 0 {
-		msg, _ := json.Marshal(models.WebSocketMessage{Type: "peer_joined", Timestamp: time.Now()})
+		msg, _ := json.Marshal(peerJoinedMsg{Type: "peer_joined", Timestamp: time.Now()})
 		for _, q := range others {
 			q.send(websocket.TextMessage, msg)
 		}

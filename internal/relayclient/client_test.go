@@ -20,22 +20,27 @@ import (
 const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // fakeRelay accepts every /ws upgrade and records every inbound frame; tests
-// push frames back down the socket with push().
+// push frames back down the socket with push(). pingInterval > 0 makes it
+// ping its member like the real relay (0 = silent relay); every dial is
+// counted so tests can observe reconnects.
 type fakeRelay struct {
 	srv *httptest.Server
 
+	pingInterval time.Duration
+
 	mu     sync.Mutex
-	conn   *websocket.Conn
-	connCh chan *websocket.Conn // closed-over live connection, per dial
+	conns  int // completed dials (reconnect counter)
+	connCh chan *websocket.Conn
 
 	frames chan string
 }
 
-func newFakeRelay(t *testing.T) *fakeRelay {
+func newFakeRelay(t *testing.T, pingInterval time.Duration) *fakeRelay {
 	t.Helper()
 	f := &fakeRelay{
-		connCh: make(chan *websocket.Conn, 4),
-		frames: make(chan string, 32),
+		pingInterval: pingInterval,
+		connCh:       make(chan *websocket.Conn, 4),
+		frames:       make(chan string, 32),
 	}
 	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	mux := http.NewServeMux()
@@ -44,8 +49,30 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 		if err != nil {
 			return
 		}
+		f.mu.Lock()
+		f.conns++
+		f.mu.Unlock()
 		f.connCh <- conn
 		defer conn.Close()
+
+		if f.pingInterval > 0 {
+			// Live-relay keepalive: ping the member, exactly like cmd/relay.
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				ticker := time.NewTicker(f.pingInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case <-ticker.C:
+						_ = conn.WriteControl(websocket.PingMessage, []byte("ka"), time.Now().Add(2*time.Second))
+					}
+				}
+			}()
+		}
+
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -60,6 +87,13 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// connCount reports how many dials the relay has served.
+func (f *fakeRelay) connCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns
 }
 
 // liveConn returns the most recent member connection (waiting briefly).
@@ -124,7 +158,7 @@ func TestWSURLDerivation(t *testing.T) {
 // snapshot push.
 func TestClientSnapshotBroadcastAndPeerJoined(t *testing.T) {
 	store := state.NewStore(0, nil)
-	f := newFakeRelay(t)
+	f := newFakeRelay(t, 0)
 
 	relayAddr := "ws" + strings.TrimPrefix(f.srv.URL, "http")
 	c := NewClient(relayAddr, testToken, store)
@@ -158,8 +192,9 @@ func TestClientSnapshotBroadcastAndPeerJoined(t *testing.T) {
 		t.Fatalf("session_update session id = %v, want sess-1", sess["id"])
 	}
 
-	// (c) peer_joined -> fresh initial_state snapshot.
-	f.push(t, conn, models.WebSocketMessage{Type: "peer_joined", Timestamp: time.Now()})
+	// (c) peer_joined -> fresh initial_state snapshot. (Sent in the real
+	// relay's shape: a type+timestamp control frame with no data field.)
+	f.push(t, conn, map[string]interface{}{"type": "peer_joined", "timestamp": time.Now()})
 	frame = nextFrame(t, f)
 	if frame["type"] != "initial_state" {
 		t.Fatalf("frame after peer_joined = %v, want initial_state", frame["type"])
@@ -171,4 +206,65 @@ func TestClientSnapshotBroadcastAndPeerJoined(t *testing.T) {
 	}
 
 	c.Stop()
+}
+
+// (regression, fix round 1) A relay that PINGS on schedule must keep the
+// client's read deadline alive even though the link carries no relay→client
+// DATA frames: pings are consumed inside ReadMessage and never surface as
+// messages, so only a deadline-refreshing PingHandler prevents a permanent
+// read-timeout → reconnect cycle (the connection used to die at exactly
+// readWindow on every quiet link).
+func TestClientSurvivesRelayPingsPastReadWindow(t *testing.T) {
+	store := state.NewStore(0, nil)
+	f := newFakeRelay(t, 100*time.Millisecond) // relay pings every 100ms
+
+	c := NewClient("ws"+strings.TrimPrefix(f.srv.URL, "http"), testToken, store)
+	c.readWindow = 500 * time.Millisecond // 3 pings per window, like 30s/90s
+	c.Start(context.Background())
+	defer c.Stop()
+
+	// On-open snapshot must arrive.
+	if frame := nextFrame(t, f); frame["type"] != "initial_state" {
+		t.Fatalf("first frame type = %v, want initial_state", frame["type"])
+	}
+
+	// Survive well past 3x the read window (1.5s) with ZERO reconnects.
+	time.Sleep(2 * time.Second)
+	if n := f.connCount(); n != 1 {
+		t.Fatalf("relay served %d connections, want exactly 1 — the read deadline expired despite live pings", n)
+	}
+	// A reconnect would also have re-pushed a snapshot: nothing may follow.
+	select {
+	case raw := <-f.frames:
+		t.Fatalf("unexpected extra frame after the on-open snapshot: %s", raw)
+	default:
+	}
+}
+
+// (fix round 1) The flip side: a SILENT relay (no pings, no frames — dead or
+// wedged) must still trip the read window and trigger the reconnect path.
+func TestClientReconnectsWhenRelayGoesSilent(t *testing.T) {
+	store := state.NewStore(0, nil)
+	f := newFakeRelay(t, 0) // never pings, never sends
+
+	c := NewClient("ws"+strings.TrimPrefix(f.srv.URL, "http"), testToken, store)
+	c.readWindow = 500 * time.Millisecond
+	c.Start(context.Background())
+	defer c.Stop()
+
+	// First connection and its on-open snapshot...
+	if frame := nextFrame(t, f); frame["type"] != "initial_state" {
+		t.Fatalf("first frame type = %v, want initial_state", frame["type"])
+	}
+
+	// ...then the 500ms read window expires with no keepalive traffic and
+	// the client must redial (window + reconnect backoff).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.connCount() >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("relay served %d connections within 5s, want >= 2 — a silent relay must trigger reconnect", f.connCount())
 }

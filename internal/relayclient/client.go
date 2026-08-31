@@ -35,11 +35,18 @@ const (
 	// handshakeTimeout bounds each dial attempt.
 	handshakeTimeout = 10 * time.Second
 
-	// readWindow mirrors the relay's default keepalive contract (ping every
-	// 30s, reap after three silent intervals): any relay traffic — pings,
-	// pongs, frames — keeps the deadline extended, so a dead relay is
-	// noticed within ~90s instead of pinning a half-open TCP connection.
-	readWindow = 90 * time.Second
+	// defaultReadWindow is how long the client may hear NOTHING from the
+	// relay before treating the link as dead. It mirrors the relay's default
+	// keepalive contract (RELAY_PING_INTERVAL = 30s): every relay PING
+	// refreshes this window (see serve's PingHandler), so a healthy link
+	// never expires it, while a dead or wedged relay is noticed within one
+	// window instead of pinning a half-open TCP connection.
+	//
+	// CONSTRAINT: the relay's RELAY_PING_INTERVAL must stay well under this
+	// window (default margin 3x, matching the relay's own reap rule). If the
+	// relay is redeployed with a longer interval, readWindow must grow with
+	// it or every quiet link will cycle through reconnects.
+	defaultReadWindow = 90 * time.Second
 
 	// subprotocolPrefix mirrors internal/api: the token rides the
 	// Sec-WebSocket-Protocol handshake as "claude-remote.<token>". Unlike a
@@ -63,6 +70,11 @@ type Client struct {
 	// ignoredMu guards ignored (log-once bookkeeping for inbound frames).
 	ignoredMu sync.Mutex
 	ignored   map[string]bool
+
+	// readWindow is how long the client waits for relay traffic (pings
+	// included) before declaring the link dead. Defaults to
+	// defaultReadWindow; tests shrink it to make keepalive failures fast.
+	readWindow time.Duration
 }
 
 // NewClient builds a relay client for one relay address and token. relayURL
@@ -70,11 +82,12 @@ type Client struct {
 // ws); token is the same 64-hex shared secret the local API uses.
 func NewClient(relayURL, token string, store *state.Store) *Client {
 	return &Client{
-		relayURL: relayURL,
-		token:    token,
-		store:    store,
-		stopCh:   make(chan struct{}),
-		ignored:  make(map[string]bool),
+		relayURL:   relayURL,
+		token:      token,
+		store:      store,
+		stopCh:     make(chan struct{}),
+		ignored:    make(map[string]bool),
+		readWindow: defaultReadWindow,
 	}
 }
 
@@ -196,11 +209,31 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sub <-chan mod
 
 	go func() {
 		defer close(readerDone)
-		extend := func() error { return conn.SetReadDeadline(time.Now().Add(readWindow)) }
+		extend := func() error { return conn.SetReadDeadline(time.Now().Add(c.readWindow)) }
 		if err := extend(); err != nil {
 			return
 		}
 		conn.SetPongHandler(func(string) error { return extend() })
+
+		// The relay's PING is this side's keepalive. gorilla consumes ping
+		// control frames inside ReadMessage WITHOUT touching the absolute
+		// read deadline — and relay→client DATA frames are rare (only
+		// peer_joined), so without this handler even a busy system's link
+		// is one-directional and every connection died at exactly readWindow
+		// (a permanent ~readWindow reconnect churn; see M4b's stats
+		// heartbeat for the mirror-image lesson). Replacing the default
+		// ping handler also suppresses gorilla's automatic pong, so answer
+		// manually — serialized with the pump through writeMu (the M4a
+		// single-writer rule; WriteControl shares the mutex for the same
+		// reason the relay's own ping ticker does).
+		conn.SetPingHandler(func(appData string) error {
+			if err := extend(); err != nil {
+				return err
+			}
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeTimeout))
+		})
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
