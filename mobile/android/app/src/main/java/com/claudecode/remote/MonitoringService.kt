@@ -1,7 +1,7 @@
 package com.claudecode.remote
 
 import android.app.Service
-import android.app.ServiceInfo
+import android.content.pm.ServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -10,7 +10,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -224,17 +223,15 @@ class MonitoringService : Service() {
     }
 
     /**
-     * Android 15 (API 35) enforces a ~6h cumulative daily cap on dataSync
-     * foreground services and calls Service.onTimeout(int) when it is
-     * reached. compileSdk is 34, so this method cannot use the `override`
-     * keyword (the SDK 34 Service class has no onTimeout); declaring the
-     * same JVM signature — onTimeout(I)V — makes the framework dispatch
-     * here on API 35+ devices, while older versions simply never call it.
-     * Gracefully stopping matters: otherwise Android 15 crashes the app with
+     * Service.onTimeout(int) exists since API 34 (introduced for the
+     * shortService time cap). Android 15 (API 35) reuses the same callback
+     * for the ~6h cumulative daily cap on dataSync foreground services, so
+     * on API 35+ devices the framework dispatches here when the cap is hit;
+     * older versions never invoke it for the dataSync type. Gracefully
+     * stopping matters: otherwise Android 15 crashes the app with
      * ForegroundServiceDidNotStopInTimeException a few seconds after the cap.
      */
-    @RequiresApi(35)
-    fun onTimeout(fgsType: Int) {
+    override fun onTimeout(fgsType: Int) {
         Log.w(TAG, "dataSync foreground time cap reached (Android 15); pausing tracking")
         running.set(false)
         mainHandler.removeCallbacks(watchdogRunnable)
