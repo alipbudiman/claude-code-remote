@@ -141,3 +141,33 @@ func TestCorruptOffsetsStartFresh(t *testing.T) {
 		t.Fatalf("offsets after corrupt load = %v, want empty", tw.fileOffsets)
 	}
 }
+
+// Stop() runs on the shutdown path while a scan may be mid-pass: it must wait
+// out the in-flight scan, persist offsets, and never deadlock or panic. The
+// deferred/double Stop must stay a no-op.
+func TestStopDuringScanWaitsAndSavesOffsets(t *testing.T) {
+	projects := filepath.Join(t.TempDir(), "projects")
+	offsets := filepath.Join(t.TempDir(), "offsets.json")
+	tw := NewTranscriptWatcherWithPaths(state.NewStore(0, nil), projects, offsets)
+	tw.fileOffsets["live.jsonl"] = 777
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tw.scan() // concurrent full pass (projects dir absent -> cheap early return)
+	}()
+	tw.Stop() // must not deadlock against the in-flight scan
+	<-done
+
+	// Offsets were persisted despite the concurrent scan.
+	data, err := os.ReadFile(offsets)
+	if err != nil {
+		t.Fatalf("offsets file missing after Stop: %v", err)
+	}
+	if !strings.Contains(string(data), `"live.jsonl":777`) {
+		t.Fatalf("offsets content = %s, want live.jsonl:777 persisted", string(data))
+	}
+
+	// Double Stop (the deferred call on the shutdown path) is a no-op.
+	tw.Stop()
+}

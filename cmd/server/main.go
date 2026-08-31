@@ -104,10 +104,11 @@ func main() {
 	}
 
 	// 4. Start Transcript File Watcher (Redundancy; offsets persist across restarts)
+	var fw *watcher.TranscriptWatcher
 	if !*noWatchFlag {
-		fw := watcher.NewTranscriptWatcher(store)
+		fw = watcher.NewTranscriptWatcher(store)
 		fw.Start()
-		defer fw.Stop()
+		defer fw.Stop() // best effort; the signal path below stops it explicitly
 		fmt.Println("✅ JSONL Transcript file watcher active on ~/.claude/projects/")
 	}
 
@@ -145,6 +146,12 @@ func main() {
 	go func() {
 		<-sigChan
 		fmt.Println("\n🛑 Shutting down Claude Code Remote Server...")
+		// os.Exit skips main's defers, so the watcher must be stopped HERE
+		// or up to 30s of transcript offsets are lost. Stop() persists
+		// offsets; sync.Once makes the deferred double-call a no-op.
+		if fw != nil {
+			fw.Stop()
+		}
 		os.Exit(0)
 	}()
 

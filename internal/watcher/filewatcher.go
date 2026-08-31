@@ -31,8 +31,11 @@ type TranscriptWatcher struct {
 	offsetsPath string
 	fileOffsets map[string]int64
 	mu          sync.Mutex
-	stopCh      chan struct{}
-	stopOnce    sync.Once
+	// scanMu serializes full scan passes and lets Stop() wait out an
+	// in-flight scan so the final offset save includes its progress.
+	scanMu   sync.Mutex
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewTranscriptWatcher initializes a new file watcher with production paths
@@ -89,11 +92,14 @@ func (tw *TranscriptWatcher) Start() {
 	}()
 }
 
-// Stop terminates the file watcher, persisting offsets first. Safe to call
-// more than once.
+// Stop terminates the file watcher, persisting offsets first. It waits for an
+// in-flight scan to finish (bounded by one incremental scan pass) so the saved
+// offsets include that scan's progress. Safe to call more than once.
 func (tw *TranscriptWatcher) Stop() {
 	tw.stopOnce.Do(func() {
 		close(tw.stopCh)
+		tw.scanMu.Lock()
+		defer tw.scanMu.Unlock()
 		tw.saveOffsets()
 	})
 }
@@ -150,6 +156,9 @@ func (tw *TranscriptWatcher) saveOffsets() {
 }
 
 func (tw *TranscriptWatcher) scan() {
+	tw.scanMu.Lock()
+	defer tw.scanMu.Unlock()
+
 	if _, err := os.Stat(tw.projectsDir); os.IsNotExist(err) {
 		return
 	}

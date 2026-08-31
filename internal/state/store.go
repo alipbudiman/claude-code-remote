@@ -286,10 +286,14 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 	}
 
-	// Durable raw-event log: record every accepted payload exactly once.
-	// Appended while holding s.mu so the log order always equals state-apply
-	// order; the log's own mutex is a leaf, so no lock inversion is possible.
-	if s.eventLog != nil {
+	// Durable raw-event log: record every accepted payload exactly once —
+	// EXCEPT replayed ones: a replayed event is already in the log (it was
+	// read from there), and re-appending it with a fresh timestamp would
+	// duplicate up to 10k lines per restart and keep ancient events inside
+	// the 24h replay window forever. Appended while holding s.mu so the log
+	// order always equals state-apply order; the log's own mutex is a leaf,
+	// so no lock inversion is possible.
+	if s.eventLog != nil && payload.Source != "replay" {
 		if err := s.eventLog.Append(payload); err != nil {
 			log.Printf("event log append failed: %v", err)
 		}

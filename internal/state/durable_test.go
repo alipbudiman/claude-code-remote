@@ -316,3 +316,45 @@ func TestRestartContinuityInFlightToolSurvives(t *testing.T) {
 		t.Fatalf("tool status after PostToolUse = %q, want %q", sess.CurrentToolStatus, "Processing results")
 	}
 }
+
+// --- 7. replay must NOT re-append to the event log (production wiring) ---------
+
+// The production boot path attaches the event log BEFORE replaying. Replay is
+// a re-feed of lines already in the log: if those events were appended again
+// (with fresh timestamps), every restart would duplicate up to 10k lines, keep
+// ancient events "recent" forever, and inflate the Replayed-N count.
+func TestReplayDoesNotReAppendToEventLog(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, eventLogName)
+
+	// Pre-restart store: live events are logged.
+	a := NewStore(0, nil)
+	a.SetEventLog(NewEventLog(dir))
+	a.HandleHookEvent(models.HookPayload{HookEventName: "PreToolUse", SessionID: "s1", ToolName: "Bash", ToolUseID: "t1"})
+	a.HandleHookEvent(models.HookPayload{HookEventName: "UserPromptSubmit", SessionID: "s1"})
+	before := len(readLogLines(t, logPath))
+	if before != 2 {
+		t.Fatalf("setup: event log lines = %d, want 2", before)
+	}
+
+	// Post-restart store with the log ATTACHED (exactly main.go's wiring),
+	// then replay.
+	b := NewStore(0, nil)
+	b.SetEventLog(NewEventLog(dir))
+	n, err := NewEventLog(dir).Replay(b.HandleHookEvent)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("replayed %d events, want 2", n)
+	}
+	if after := len(readLogLines(t, logPath)); after != before {
+		t.Fatalf("event log lines after replay = %d, want UNCHANGED (%d) — replay must not re-append", after, before)
+	}
+
+	// A subsequent LIVE event must still append.
+	b.HandleHookEvent(models.HookPayload{HookEventName: "PostToolUse", SessionID: "s1", ToolUseID: "t1"})
+	if after := len(readLogLines(t, logPath)); after != before+1 {
+		t.Fatalf("event log lines after live event = %d, want %d (live events still append)", after, before+1)
+	}
+}
