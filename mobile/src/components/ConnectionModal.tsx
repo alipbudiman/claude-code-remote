@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Network, Check, RefreshCw, Smartphone, KeyRound } from 'lucide-react';
+import { X, Network, Check, RefreshCw, Smartphone, KeyRound, Cloud } from 'lucide-react';
 import { wsService } from '../services/websocketService';
 
 interface ConnectionModalProps {
@@ -33,9 +33,19 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   port,
   onSaveUrl,
 }) => {
-  const [inputUrl, setInputUrl] = useState(currentUrl);
+  // M6: two URL fields — Railway (https://) for online relay monitoring and
+  // LAN (http://) for the desktop server. Each pre-fills only when the saved
+  // URL matches its scheme; on save, if BOTH are filled the Railway URL wins.
+  const [railwayUrl, setRailwayUrl] = useState(
+    currentUrl.startsWith('https://') ? currentUrl : ''
+  );
+  const [lanUrl, setLanUrl] = useState(
+    currentUrl.startsWith('http://') ? currentUrl : ''
+  );
   const [inputToken, setInputToken] = useState(wsService.getToken());
-  const [urlError, setUrlError] = useState(false);
+  // Which URL field failed validation (null = none). Same isValidServerUrl
+  // check as before — the error is just surfaced on the field being saved.
+  const [urlErrorField, setUrlErrorField] = useState<'railway' | 'lan' | null>(null);
 
   if (!isOpen) return null;
 
@@ -57,12 +67,16 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isValidServerUrl(inputUrl)) {
-      setUrlError(true);
+    // M6: whichever field is non-empty wins; when both are filled the
+    // Railway (online) URL takes precedence.
+    const railway = railwayUrl.trim();
+    const chosen = railway || lanUrl.trim();
+    if (!chosen || !isValidServerUrl(chosen)) {
+      setUrlErrorField(railway ? 'railway' : 'lan');
       return;
     }
-    setUrlError(false);
-    onSaveUrl(inputUrl);
+    setUrlErrorField(null);
+    onSaveUrl(chosen);
     wsService.setToken(inputToken);
     syncNativeConfig();
     onClose();
@@ -78,7 +92,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 
   const handleSelectIP = (ip: string) => {
     const url = `http://${ip}:${port || 9280}`;
-    setInputUrl(url);
+    setLanUrl(url);
     onSaveUrl(url);
     syncNativeConfig();
     onClose();
@@ -93,7 +107,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               <Network size={20} />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">LAN Connection Settings</h3>
+              <h3 className="text-base font-bold text-white">Connection Settings</h3>
               <p className="text-xs text-slate-400">Connect to Claude Remote Desktop</p>
             </div>
           </div>
@@ -106,23 +120,55 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
         </div>
 
         <form onSubmit={handleSave} className="space-y-4">
+          {/* M6: online path — the Railway relay URL (https). Pre-filled when
+              the saved URL is already a remote one. */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
-              Desktop Server IP & Port
+              Railway URL (Online)
+            </label>
+            <div className="relative">
+              <Cloud size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
+              <input
+                type="text"
+                value={railwayUrl}
+                onChange={(e) => {
+                  setRailwayUrl(e.target.value);
+                  if (urlErrorField) setUrlErrorField(null);
+                }}
+                placeholder="https://your-relay.up.railway.app"
+                className={`w-full pl-9 pr-4 py-3 rounded-xl bg-black/40 border ${
+                  urlErrorField === 'railway' ? 'border-red-500/70' : 'border-white/10'
+                } text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]`}
+              />
+            </div>
+            {urlErrorField === 'railway' && (
+              <p className="text-[11px] text-red-400 mt-1">
+                Enter a valid relay URL with a host, e.g. <code>https://your-relay.up.railway.app</code>
+              </p>
+            )}
+            <p className="text-[11px] text-slate-500 mt-1">
+              Use your Railway relay URL to monitor from any network
+            </p>
+          </div>
+
+          {/* M6: LAN path — the desktop server on the local Wi-Fi (http). */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+              Server LAN (IP:Port)
             </label>
             <input
               type="text"
-              value={inputUrl}
+              value={lanUrl}
               onChange={(e) => {
-                setInputUrl(e.target.value);
-                if (urlError) setUrlError(false);
+                setLanUrl(e.target.value);
+                if (urlErrorField) setUrlErrorField(null);
               }}
-              placeholder="http://192.168.1.15:9280"
+              placeholder="http://192.168.x.x:9280"
               className={`w-full px-4 py-3 rounded-xl bg-black/40 border ${
-                urlError ? 'border-red-500/70' : 'border-white/10'
+                urlErrorField === 'lan' ? 'border-red-500/70' : 'border-white/10'
               } text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]`}
             />
-            {urlError && (
+            {urlErrorField === 'lan' && (
               <p className="text-[11px] text-red-400 mt-1">
                 Enter a valid server URL with a host, e.g. <code>http://192.168.1.15:9280</code>
               </p>
@@ -197,7 +243,8 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
         <div className="mt-5 p-3 rounded-xl bg-white/[0.02] border border-white/5 flex items-start space-x-2 text-xs text-slate-400">
           <Smartphone size={16} className="text-[#D97757] shrink-0 mt-0.5" />
           <p>
-            Make sure your phone and PC are connected to the same Wi-Fi network or Hotspot. No mobile data or internet is consumed.
+            LAN mode: keep phone and PC on the same Wi-Fi/hotspot — no internet consumed.
+            With a Railway URL, monitoring works from any network.
           </p>
         </div>
       </div>

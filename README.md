@@ -1,6 +1,6 @@
 # Claude Code Remote Session Monitor (Go Server EXE & Android APK)
 
-Aplikasi remote monitoring sesi dan sub-agent untuk [Claude Code](https://github.com/anthropics/claude-code) berbasis **Go Server Executable (Desktop)** dan **Android Application (APK)**. Sistem ini bekerja 100% pada jaringan lokal (**Local LAN / Wi-Fi**) melalui port `0.0.0.0:9280`, sehingga **tidak memerlukan kuota internet** untuk komunikasi antara PC dan HP Android.
+Aplikasi remote monitoring sesi dan sub-agent untuk [Claude Code](https://github.com/anthropics/claude-code) berbasis **Go Server Executable (Desktop)** dan **Android Application (APK)**. Sistem ini bekerja 100% pada jaringan lokal (**Local LAN / Wi-Fi**) melalui port `0.0.0.0:9280`, sehingga **tidak memerlukan kuota internet** untuk komunikasi antara PC dan HP Android. Butuh akses dari luar jaringan lokal (selular/sekolah/kantor)? Lihat bagian [**Akses Online via Railway (Relay)**](#akses-online-via-railway-relay) di bawah.
 
 Dibuat berdasarkan analisis arsitektur event-driven & hook system dari [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents).
 
@@ -27,6 +27,37 @@ Dibuat berdasarkan analisis arsitektur event-driven & hook system dari [pixel-ag
 3. **Otomatisasi CI/CD GitHub Actions**:
    - `.github/workflows/build-apk.yml`: Otomatis meng-compile APK dari repositori GitHub dan menerbitkan rilis APK siap download di HP Android.
    - `.github/workflows/build-server.yml`: Otomatis meng-compile binary Go untuk Windows (`.exe`), Linux, dan macOS.
+
+---
+
+## Akses Online via Railway (Relay)
+
+Mode default sistem ini adalah LAN lokal. Untuk memantau dari jaringan mana pun (selular, Wi-Fi sekolah/kantor, dsb.), deploy **relay** ke [Railway](https://railway.com): server desktop melakukan *dial-out* ke relay tersebut (tanpa port-forward / IP publik), lalu HP cukup terhubung ke URL relay yang sama dengan token yang sama.
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/YOUR-TEMPLATE-ID?ref=github-alipbudiman)
+
+> **Catatan:** tombol di atas membutuhkan template Railway yang di-*publish* sekali oleh pemilik repo. Cara publish: buka project di Railway → menu **Settings → Templates → Create Template** (atau langsung ke https://railway.com/templates/create), publish dari service `claude-remote-relay`, lalu ganti `YOUR-TEMPLATE-ID` pada link tombol dengan kode template yang didapat. Sampai template ter-*publish*, gunakan langkah manual berikut (sudah berfungsi hari ini).
+
+### 1. Deploy Relay ke Railway (Manual)
+
+1. Login ke https://railway.com → **New Project → Deploy from GitHub repo** → pilih repo `claude-code-remote` (fork dulu jika bukan milik Anda).
+2. Railway memakai `Dockerfile` di root (membangun `cmd/relay` — server relay, bukan desktop monitor).
+3. Service → **Settings → Networking → Generate Domain** → catat URL (mis. `https://xxx.up.railway.app`).
+4. Cek: `https://<domain>/health` harus mengembalikan `{"service":"claude-remote-relay","status":"ok"}`.
+
+### 2. Setup di PC (Desktop Server)
+
+Jalankan server desktop dengan `claude-remote-server.exe -port 9280 --relay wss://<domain-relay-anda>` (atau set env `RELAY_URL=wss://...`). Token diambil otomatis dari `~/.claude/claude-remote-token`. Server melakukan *dial-out* ke relay — **tidak perlu port-forward atau IP publik**.
+
+### 3. Setup di HP (APK)
+
+1. Install APK → buka pengaturan (ikon gear).
+2. Isi **Railway URL** `https://<domain-relay-anda>` + **Token** (isi file `claude-remote-token` di PC).
+3. Status & notifikasi mengalir dari jaringan mana pun (selular/sekolah/kantor).
+
+### 4. Catatan Keamanan
+
+Token = kunci room relay. Siapa pun yang memegang token bisa membaca stream status — **jangan dibagikan**. Rotasi token: hapus `~/.claude/claude-remote-token` lalu restart server (token baru otomatis dibuat), kemudian perbarui token di HP.
 
 ---
 
