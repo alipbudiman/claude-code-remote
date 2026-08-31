@@ -3,11 +3,35 @@ package state
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/models"
+)
+
+const (
+	// defaultIdleTimeout is how long a session may receive no hook events
+	// before the liveness FALLBACK marks it stalled/idle. The hooks are the
+	// primary signal; this only fires when tracking loses contact entirely.
+	defaultIdleTimeout = 300 * time.Second
+
+	// staleQuestionTimeout is how long a pending question may sit unanswered
+	// before it is downgraded to a stale marker on an idle session.
+	staleQuestionTimeout = 30 * time.Minute
+
+	// sessionEvictionAge is how long a session may stay silent before it is
+	// dropped from memory entirely.
+	sessionEvictionAge = 24 * time.Hour
+
+	// maxSnapshotSessions caps the session list handed to clients.
+	maxSnapshotSessions = 20
+
+	// toolIDCacheCap bounds the per-session seen-tool_use id set (LRU) used
+	// to deduplicate JSONL-watcher replays.
+	toolIDCacheCap = 500
 )
 
 // Store manages the in-memory state of Claude Code sessions, subagents, and notifications
@@ -19,10 +43,27 @@ type Store struct {
 	subscribers   map[chan models.WebSocketMessage]bool
 	port          int
 	hostIPs       []string
+	idleTimeout   time.Duration
+
+	// seenToolIDs caches recently seen tool_use ids per session so watcher
+	// replays of hook-delivered events can be detected and dropped.
+	seenToolIDs map[string]*toolIDCache
+	// stallNotified supports anti-flap: at most one stalled notification per
+	// session per idle episode (reset whenever new activity arrives).
+	stallNotified map[string]bool
 }
 
-// NewStore initializes an empty state store
+// NewStore initializes an empty state store with the default liveness timeout.
 func NewStore(port int, hostIPs []string) *Store {
+	return NewStoreWithIdleTimeout(port, hostIPs, defaultIdleTimeout)
+}
+
+// NewStoreWithIdleTimeout is NewStore with an explicit liveness-fallback
+// timeout (how long a session may stay silent before it is marked stalled).
+func NewStoreWithIdleTimeout(port int, hostIPs []string, idleTimeout time.Duration) *Store {
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
 	return &Store{
 		sessions:      make(map[string]*models.Session),
 		subagents:     make(map[string]*models.Subagent),
@@ -30,6 +71,47 @@ func NewStore(port int, hostIPs []string) *Store {
 		subscribers:   make(map[chan models.WebSocketMessage]bool),
 		port:          port,
 		hostIPs:       hostIPs,
+		idleTimeout:   idleTimeout,
+		seenToolIDs:   make(map[string]*toolIDCache),
+		stallNotified: make(map[string]bool),
+	}
+}
+
+// toolIDCache is a bounded set of recently seen tool_use ids (LRU, cap
+// toolIDCacheCap). It detects JSONL-watcher replays of tool_use blocks the
+// hooks already delivered.
+type toolIDCache struct {
+	ids   map[string]struct{}
+	order []string // least recently seen first
+}
+
+func newToolIDCache() *toolIDCache {
+	return &toolIDCache{ids: make(map[string]struct{})}
+}
+
+func (c *toolIDCache) seen(id string) bool {
+	_, ok := c.ids[id]
+	return ok
+}
+
+// add records the id as most recently seen, evicting the oldest id once the
+// cap is reached.
+func (c *toolIDCache) add(id string) {
+	if c.seen(id) {
+		for i, v := range c.order {
+			if v == id {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append(c.order, id)
+		return
+	}
+	c.ids[id] = struct{}{}
+	c.order = append(c.order, id)
+	if len(c.order) > toolIDCacheCap {
+		delete(c.ids, c.order[0])
+		c.order = c.order[1:]
 	}
 }
 
@@ -126,6 +208,17 @@ func (s *Store) GetOrCreateSession(sessionID, projectDir, transcriptPath string)
 	return sess
 }
 
+// toolCacheForLocked returns (creating if needed) the per-session tool id
+// cache. Caller must hold s.mu.
+func (s *Store) toolCacheForLocked(sessionID string) *toolIDCache {
+	cache, ok := s.seenToolIDs[sessionID]
+	if !ok {
+		cache = newToolIDCache()
+		s.seenToolIDs[sessionID] = cache
+	}
+	return cache
+}
+
 // HandleHookEvent processes incoming events from Claude Code hooks
 func (s *Store) HandleHookEvent(payload models.HookPayload) {
 	if payload.SessionID == "" {
@@ -140,22 +233,24 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			projectName = filepath.Base(payload.Cwd)
 		}
 		sess = &models.Session{
-			ID:                payload.SessionID,
-			ProjectName:       projectName,
-			ProjectDir:        payload.Cwd,
-			Status:            models.StatusActive,
-			ActiveSubagents:   make(map[string]*models.Subagent),
-			SubagentHistory:   make([]*models.Subagent, 0),
-			ActiveToolIDs:     make(map[string]string),
-			TranscriptPath:    payload.TranscriptPath,
-			StartTime:         time.Now(),
-			LastActivity:      time.Now(),
-			RecentLogs:        make([]string, 0),
+			ID:              payload.SessionID,
+			ProjectName:     projectName,
+			ProjectDir:      payload.Cwd,
+			Status:          models.StatusActive,
+			ActiveSubagents: make(map[string]*models.Subagent),
+			SubagentHistory: make([]*models.Subagent, 0),
+			ActiveToolIDs:   make(map[string]string),
+			TranscriptPath:  payload.TranscriptPath,
+			StartTime:       time.Now(),
+			LastActivity:    time.Now(),
+			RecentLogs:      make([]string, 0),
 		}
 		s.sessions[payload.SessionID] = sess
 	}
 
 	sess.LastActivity = time.Now()
+	// New activity ends any stall episode, re-arming the stalled notification.
+	delete(s.stallNotified, payload.SessionID)
 	nowStr := time.Now().Format("15:04:05")
 
 	appendLog := func(msg string) {
@@ -165,11 +260,25 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 	}
 
+	// Watcher redundancy dedup: the JSONL watcher may replay a tool_use the
+	// hooks already delivered. A replayed id must refresh nothing and notify
+	// nothing. (Ids are recorded for hook AND watcher events alike.)
+	if payload.HookEventName == "PreToolUse" && payload.ToolUseID != "" {
+		cache := s.toolCacheForLocked(payload.SessionID)
+		alreadySeen := cache.seen(payload.ToolUseID)
+		cache.add(payload.ToolUseID)
+		if payload.Source == "watcher" && alreadySeen {
+			s.mu.Unlock()
+			return
+		}
+	}
+
 	var notifTitle, notifBody, notifType string
 
 	switch payload.HookEventName {
 	case "SessionStart":
 		sess.Status = models.StatusActive
+		sess.TurnActive = true
 		sess.CurrentToolStatus = "Claude Code connected"
 		sess.PendingQuestion = nil
 		appendLog("Session connected")
@@ -177,7 +286,17 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		notifBody = fmt.Sprintf("Session active for %s", sess.ProjectName)
 		notifType = "working"
 
+	case "UserPromptSubmit":
+		// Turn start: the user just submitted a prompt. This is not
+		// notification-worthy (the user did it themselves).
+		sess.Status = models.StatusActive
+		sess.TurnActive = true
+		sess.PendingQuestion = nil
+		sess.CurrentToolStatus = "Working on your prompt…"
+		appendLog("User prompt submitted")
+
 	case "PreToolUse":
+		sess.TurnActive = true
 		sess.CurrentTool = payload.ToolName
 		statusDesc := hooks.FormatToolStatus(payload.ToolName, payload.ToolInput)
 		sess.CurrentToolStatus = statusDesc
@@ -212,12 +331,13 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			}
 
 			sess.PendingQuestion = &models.PendingQuestion{
-				Type:     "question",
-				Title:    "Question from Claude",
-				Question: qText,
-				ToolName: payload.ToolName,
-				Options:  options,
-				AskedAt:  time.Now(),
+				Type:      "question",
+				Title:     "Question from Claude",
+				Question:  qText,
+				ToolName:  payload.ToolName,
+				ToolUseID: payload.ToolUseID,
+				Options:   options,
+				AskedAt:   time.Now(),
 			}
 			notifTitle = "❓ Claude Code Question"
 			notifBody = qText
@@ -226,18 +346,23 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			sess.Status = models.StatusWaitingPermission
 			qText := "Claude Code has completed the implementation plan and is requesting your review/approval to begin execution."
 			sess.PendingQuestion = &models.PendingQuestion{
-				Type:     "question",
-				Title:    "📋 Plan Ready for Review (ExitPlanMode)",
-				Question: qText,
-				ToolName: payload.ToolName,
-				AskedAt:  time.Now(),
+				Type:      "question",
+				Title:     "📋 Plan Ready for Review (ExitPlanMode)",
+				Question:  qText,
+				ToolName:  payload.ToolName,
+				ToolUseID: payload.ToolUseID,
+				AskedAt:   time.Now(),
 			}
 			notifTitle = "📋 Plan Ready for Review (ExitPlanMode)"
 			notifBody = "Claude Code completed planning and is waiting for your review in the terminal."
 			notifType = "permission"
 		} else if payload.ToolName == "Task" || payload.ToolName == "Agent" || payload.ToolName == "invoke_subagent" {
 			sess.Status = models.StatusSubagentRunning
-			subID := payload.ToolUseID
+			// Prefer the subagent's own identity; fall back to the tool_use id.
+			subID := payload.AgentID
+			if subID == "" {
+				subID = payload.ToolUseID
+			}
 			if subID == "" {
 				subID = fmt.Sprintf("sub-%d", time.Now().UnixNano())
 			}
@@ -269,21 +394,35 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 	case "PostToolUse", "PostToolUseFailure":
 		if payload.ToolUseID != "" {
 			delete(sess.ActiveToolIDs, payload.ToolUseID)
-			if sub, hasSub := sess.ActiveSubagents[payload.ToolUseID]; hasSub {
+			// Same identity preference the subagent was keyed with.
+			subKey := payload.AgentID
+			if subKey == "" {
+				subKey = payload.ToolUseID
+			}
+			if sub, hasSub := sess.ActiveSubagents[subKey]; hasSub {
 				t := time.Now()
 				sub.CompletedAt = &t
 				sub.Status = "completed"
 				sub.CurrentToolStatus = "Completed"
 				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
-				delete(sess.ActiveSubagents, payload.ToolUseID)
-				delete(s.subagents, payload.ToolUseID)
+				delete(sess.ActiveSubagents, subKey)
+				delete(s.subagents, subKey)
 				appendLog(fmt.Sprintf("Sub-agent finished: %s", sub.Description))
 				notifTitle = "🤖 Sub-Agent Completed"
 				notifBody = fmt.Sprintf("%s finished: %s", sub.AgentType, sub.Description)
 				notifType = "subagent"
 			}
 		}
+		// The asking tool completed: the question was answered at the PC.
+		if sess.PendingQuestion != nil && payload.ToolUseID != "" && payload.ToolUseID == sess.PendingQuestion.ToolUseID {
+			sess.PendingQuestion = nil
+		}
 		if len(sess.ActiveToolIDs) == 0 && len(sess.ActiveSubagents) == 0 && sess.PendingQuestion == nil {
+			if sess.TurnActive {
+				// Restores a session that was idled mid-turn (e.g. by the
+				// old 4s engine or a watcher gap): the turn is still open.
+				sess.Status = models.StatusActive
+			}
 			sess.CurrentTool = ""
 			sess.CurrentToolStatus = "Processing results"
 		}
@@ -307,12 +446,13 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 
 		sess.PendingQuestion = &models.PendingQuestion{
-			Type:     "permission",
-			Title:    fmt.Sprintf("Permission Required (%s)", payload.ToolName),
-			Question: qText,
-			ToolName: payload.ToolName,
-			Reason:   reason,
-			AskedAt:  time.Now(),
+			Type:      "permission",
+			Title:     fmt.Sprintf("Permission Required (%s)", payload.ToolName),
+			Question:  qText,
+			ToolName:  payload.ToolName,
+			ToolUseID: payload.ToolUseID,
+			Reason:    reason,
+			AskedAt:   time.Now(),
 		}
 		sess.CurrentToolStatus = "Waiting for permission / confirmation"
 		appendLog(fmt.Sprintf("Permission requested: %s", qText))
@@ -321,7 +461,11 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		notifType = "permission"
 
 	case "SubagentStart":
-		subID := payload.ToolUseID
+		// Key by the subagent's own identity when provided.
+		subID := payload.AgentID
+		if subID == "" {
+			subID = payload.ToolUseID
+		}
 		if subID == "" {
 			subID = fmt.Sprintf("subagent-%d", time.Now().UnixNano())
 		}
@@ -355,36 +499,31 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		notifType = "subagent"
 
 	case "SubagentStop", "TaskCompleted", "TeammateIdle":
-		if payload.ToolUseID != "" {
-			if sub, hasSub := sess.ActiveSubagents[payload.ToolUseID]; hasSub {
+		// Complete EXACTLY the subagent identified by agent_id (fallback
+		// tool_use_id). Completing ALL remaining subagents lives only under
+		// Stop — an unidentified SubagentStop must not clobber parallel agents.
+		subID := payload.AgentID
+		if subID == "" {
+			subID = payload.ToolUseID
+		}
+		if subID != "" {
+			if sub, hasSub := sess.ActiveSubagents[subID]; hasSub {
 				t := time.Now()
 				sub.CompletedAt = &t
 				sub.Status = "completed"
 				sub.CurrentToolStatus = "Completed"
 				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
-				delete(sess.ActiveSubagents, payload.ToolUseID)
-				delete(s.subagents, payload.ToolUseID)
+				delete(sess.ActiveSubagents, subID)
+				delete(s.subagents, subID)
 				appendLog(fmt.Sprintf("Sub-agent completed: %s", sub.Description))
 			}
-		} else {
-			// Complete all remaining active subagents
-			t := time.Now()
-			for id, sub := range sess.ActiveSubagents {
-				sub.CompletedAt = &t
-				sub.Status = "completed"
-				sub.CurrentToolStatus = "Completed"
-				sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
-				delete(s.subagents, id)
-			}
-			sess.ActiveSubagents = make(map[string]*models.Subagent)
-			appendLog("All sub-agents completed tasks")
 		}
-		if len(sess.ActiveSubagents) == 0 {
+		if len(sess.ActiveSubagents) == 0 && sess.TurnActive {
 			sess.Status = models.StatusActive
 		}
 
 	case "Stop":
-		// Mark all remaining subagents completed and remove from active map
+		// Turn finished: complete all remaining subagents and retire tools.
 		t := time.Now()
 		for id, sub := range sess.ActiveSubagents {
 			sub.CompletedAt = &t
@@ -395,6 +534,7 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 		sess.ActiveSubagents = make(map[string]*models.Subagent)
 		sess.Status = models.StatusIdle
+		sess.TurnActive = false
 		sess.CurrentTool = ""
 		sess.CurrentToolStatus = "Idling (Ready for prompt)"
 		sess.PendingQuestion = nil
@@ -406,6 +546,7 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 
 	case "SessionEnd":
 		sess.Status = models.StatusCompleted
+		sess.TurnActive = false
 		sess.CurrentToolStatus = "Session ended"
 		sess.PendingQuestion = nil
 		appendLog("Session closed")
@@ -419,7 +560,14 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			msg = payload.NotificationType
 		}
 		appendLog(fmt.Sprintf("Notification: %s", msg))
-		if payload.NotificationType == "waiting_input" || payload.NotificationType == "permission_prompt" {
+		// Permission-style alerts: explicit types or the standard phrasings.
+		lowerMsg := strings.ToLower(msg)
+		permissionAlert := payload.NotificationType == "waiting_input" ||
+			payload.NotificationType == "permission_prompt" ||
+			payload.NotificationType == "agent_needs_input" ||
+			strings.Contains(lowerMsg, "permission") ||
+			strings.Contains(lowerMsg, "needs your input")
+		if permissionAlert {
 			notifTitle = "⚠️ User Input Required"
 			notifType = "permission"
 		} else {
@@ -438,8 +586,9 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		Timestamp: time.Now(),
 	})
 
-	// Dispatch notification if applicable
-	if notifTitle != "" {
+	// The watcher is a redundancy channel: it may backfill state, but it must
+	// never raise heads-up notifications.
+	if notifTitle != "" && payload.Source != "watcher" {
 		s.AddNotification(sess.ID, notifTitle, notifBody, notifType)
 	}
 }
@@ -449,13 +598,28 @@ func (s *Store) GetSnapshot() models.ServerStateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Deterministic, bounded session list: sessions silent for over 24h are
+	// excluded, the rest are ordered most-recent-activity-first (max 20).
+	evictCutoff := time.Now().Add(-sessionEvictionAge)
 	sessionList := make([]*models.Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		if sess.LastActivity.Before(evictCutoff) {
+			continue
+		}
+		sessionList = append(sessionList, sess)
+	}
+	sort.Slice(sessionList, func(i, j int) bool {
+		return sessionList[i].LastActivity.After(sessionList[j].LastActivity)
+	})
+	if len(sessionList) > maxSnapshotSessions {
+		sessionList = sessionList[:maxSnapshotSessions]
+	}
+
 	var activeSession *models.Session
 	workingState := false
 	activeSubagentCount := 0
 
-	for _, sess := range s.sessions {
-		sessionList = append(sessionList, sess)
+	for _, sess := range sessionList {
 		if sess.Status == models.StatusActive || sess.Status == models.StatusSubagentRunning || sess.Status == models.StatusWaitingPermission {
 			workingState = true
 			if activeSession == nil || sess.LastActivity.After(activeSession.LastActivity) {
@@ -465,6 +629,8 @@ func (s *Store) GetSnapshot() models.ServerStateSnapshot {
 		activeSubagentCount += len(sess.ActiveSubagents)
 	}
 
+	// Deterministic fallback when no session is working: the most recent
+	// activity, never map order.
 	if activeSession == nil && len(sessionList) > 0 {
 		activeSession = sessionList[0]
 	}
@@ -494,25 +660,6 @@ func (s *Store) GetSnapshot() models.ServerStateSnapshot {
 	return snap
 }
 
-// UpdateSubagentActivity directly updates a subagent's tool activity
-func (s *Store) UpdateSubagentActivity(sessionID, subagentID, toolName, toolStatus string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if sess, ok := s.sessions[sessionID]; ok {
-		if sub, subOk := sess.ActiveSubagents[subagentID]; subOk {
-			sub.CurrentTool = toolName
-			sub.CurrentToolStatus = toolStatus
-			sess.LastActivity = time.Now()
-			s.broadcast(models.WebSocketMessage{
-				Type:      "subagent_update",
-				Data:      sub,
-				Timestamp: time.Now(),
-			})
-		}
-	}
-}
-
 // GetAllSubagents returns all active & historical subagents
 func (s *Store) GetAllSubagents() []*models.Subagent {
 	s.mu.RLock()
@@ -530,7 +677,8 @@ func (s *Store) GetAllSubagents() []*models.Subagent {
 	return list
 }
 
-// StartLivenessWatcher checks sessions every 1 second to detect task completions and prevent stuck states
+// StartLivenessWatcher runs the 1s liveness fallback loop: stale-question
+// downgrades, stalled sessions, and 24h session eviction.
 func (s *Store) StartLivenessWatcher() {
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
@@ -542,57 +690,119 @@ func (s *Store) StartLivenessWatcher() {
 	}()
 }
 
+// checkLivenessAndAutoIdle is the FALLBACK engine. Hooks are the primary
+// signal: a session is only marked stalled when it has NO in-flight tools, NO
+// pending question, and has been silent for the whole idle timeout.
 func (s *Store) checkLivenessAndAutoIdle() {
 	s.mu.Lock()
-	var completedSessions []*models.Session
+	now := time.Now()
 
-	for _, sess := range s.sessions {
-		// Only inspect sessions that are marked working
-		if sess.Status == models.StatusActive || sess.Status == models.StatusSubagentRunning {
-			// If Claude Code is awaiting user response/permission, do not auto-idle
-			if sess.PendingQuestion != nil || sess.Status == models.StatusWaitingPermission {
-				continue
+	type stalledSession struct {
+		sess   *models.Session
+		mins   int
+		notify bool
+	}
+	var stalled []stalledSession
+	var updated []*models.Session
+
+	for id, sess := range s.sessions {
+		// Session hygiene: sessions silent for a day are dropped entirely.
+		if now.Sub(sess.LastActivity) >= sessionEvictionAge {
+			for subID := range sess.ActiveSubagents {
+				delete(s.subagents, subID)
 			}
-
-			// If last tool/task activity was more than 4 seconds ago
-			if time.Since(sess.LastActivity) >= 4*time.Second {
-				// Mark any stale running subagents as completed
-				for _, sub := range sess.ActiveSubagents {
-					t := time.Now()
-					sub.CompletedAt = &t
-					sub.Status = "completed"
-					sub.CurrentToolStatus = "Completed"
-					sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
-				}
-				sess.ActiveSubagents = make(map[string]*models.Subagent)
-				sess.ActiveToolIDs = make(map[string]string)
-				sess.CurrentTool = ""
-				sess.CurrentToolStatus = "Idling (Ready for prompt)"
-				sess.Status = models.StatusIdle
-				sess.RecentLogs = append([]string{fmt.Sprintf("[%s] Turn finished (Ready for prompt)", time.Now().Format("15:04:05"))}, sess.RecentLogs...)
-				if len(sess.RecentLogs) > 50 {
-					sess.RecentLogs = sess.RecentLogs[:50]
-				}
-
-				completedSessions = append(completedSessions, sess)
+			for _, sub := range sess.SubagentHistory {
+				delete(s.subagents, sub.ID)
 			}
+			delete(s.sessions, id)
+			delete(s.seenToolIDs, id)
+			delete(s.stallNotified, id)
+			continue
 		}
+
+		// A question unanswered for half an hour is stale, not pending.
+		if sess.PendingQuestion != nil && sess.Status != models.StatusIdle &&
+			now.Sub(sess.LastActivity) >= staleQuestionTimeout {
+			sess.Status = models.StatusIdle
+			sess.PendingQuestion.Stale = true
+			sess.RecentLogs = append([]string{fmt.Sprintf("[%s] Question unanswered for 30m — marked stale", now.Format("15:04:05"))}, sess.RecentLogs...)
+			if len(sess.RecentLogs) > 50 {
+				sess.RecentLogs = sess.RecentLogs[:50]
+			}
+			updated = append(updated, sess)
+		}
+
+		// Only working sessions can stall.
+		if sess.Status != models.StatusActive && sess.Status != models.StatusSubagentRunning {
+			continue
+		}
+		// 1. A registered tool_use is in flight — only its PostToolUse /
+		//    PostToolUseFailure / Stop retires it. NEVER auto-idle here.
+		if len(sess.ActiveToolIDs) > 0 {
+			continue
+		}
+		// 2. Waiting on the user, not stalled.
+		if sess.PendingQuestion != nil {
+			continue
+		}
+		// 3. Still inside the idle window.
+		if now.Sub(sess.LastActivity) < s.idleTimeout {
+			continue
+		}
+
+		// Stall fallback: same cleanup as a completed turn, but the
+		// notification is a "stalled" warning — never a false task_done.
+		silentFor := now.Sub(sess.LastActivity)
+		mins := int((silentFor + time.Minute - 1) / time.Minute)
+		if mins < 1 {
+			mins = 1
+		}
+		for subID, sub := range sess.ActiveSubagents {
+			t := now
+			sub.CompletedAt = &t
+			sub.Status = "completed"
+			sub.CurrentToolStatus = "Completed"
+			sess.SubagentHistory = append([]*models.Subagent{sub}, sess.SubagentHistory...)
+			delete(s.subagents, subID)
+		}
+		sess.ActiveSubagents = make(map[string]*models.Subagent)
+		sess.ActiveToolIDs = make(map[string]string)
+		sess.CurrentTool = ""
+		sess.CurrentToolStatus = "Idling (Ready for prompt)"
+		sess.Status = models.StatusIdle
+		sess.RecentLogs = append([]string{fmt.Sprintf("[%s] No events for %dm — fell back to idle (tracking may be stale)", now.Format("15:04:05"), mins)}, sess.RecentLogs...)
+		if len(sess.RecentLogs) > 50 {
+			sess.RecentLogs = sess.RecentLogs[:50]
+		}
+
+		// Anti-flap: at most ONE stalled notification per idle episode.
+		notify := !s.stallNotified[id]
+		s.stallNotified[id] = true
+		stalled = append(stalled, stalledSession{sess: sess, mins: mins, notify: notify})
 	}
 	s.mu.Unlock()
 
-	// Broadcast updates and send Task Completed notifications for each auto-idled session
-	for _, sess := range completedSessions {
+	for _, sess := range updated {
 		s.broadcast(models.WebSocketMessage{
 			Type:      "session_update",
 			Data:      sess,
 			Timestamp: time.Now(),
 		})
+	}
 
-		s.AddNotification(
-			sess.ID,
-			"✅ Task Completed",
-			fmt.Sprintf("Claude Code finished working on %s and is ready for your next prompt.", sess.ProjectName),
-			"task_done",
-		)
+	for _, st := range stalled {
+		s.broadcast(models.WebSocketMessage{
+			Type:      "session_update",
+			Data:      st.sess,
+			Timestamp: time.Now(),
+		})
+		if st.notify {
+			s.AddNotification(
+				st.sess.ID,
+				fmt.Sprintf("⚠️ No Events for %dm", st.mins),
+				fmt.Sprintf("Tracking lost contact with Claude Code for %s. Status may be outdated.", st.sess.ProjectName),
+				"stalled",
+			)
+		}
 	}
 }

@@ -28,13 +28,15 @@ type Subagent struct {
 
 // PendingQuestion represents a question or permission approval Claude Code is currently asking the user
 type PendingQuestion struct {
-	Type     string    `json:"type"` // "permission", "question", "confirmation"
-	Title    string    `json:"title"`
-	Question string    `json:"question"`
-	ToolName string    `json:"tool_name,omitempty"`
-	Options  []string  `json:"options,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	AskedAt  time.Time `json:"asked_at"`
+	Type      string    `json:"type"` // "permission", "question", "confirmation"
+	Title     string    `json:"title"`
+	Question  string    `json:"question"`
+	ToolName  string    `json:"tool_name,omitempty"`
+	ToolUseID string    `json:"tool_use_id,omitempty"` // id of the asking tool_use; its PostToolUse clears the question
+	Options   []string  `json:"options,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Stale     bool      `json:"stale"` // true once the question sat unanswered past the stale window
+	AskedAt   time.Time `json:"asked_at"`
 }
 
 // Session represents a tracked Claude Code session
@@ -49,6 +51,7 @@ type Session struct {
 	ActiveSubagents   map[string]*Subagent `json:"active_subagents"`
 	SubagentHistory   []*Subagent          `json:"subagent_history"`
 	ActiveToolIDs     map[string]string    `json:"active_tool_ids"`
+	TurnActive        bool                 `json:"turn_active"` // true between UserPromptSubmit/PreToolUse and Stop
 	TranscriptPath    string               `json:"transcript_path"`
 	StartTime         time.Time            `json:"start_time"`
 	LastActivity      time.Time            `json:"last_activity"`
@@ -64,6 +67,7 @@ type HookPayload struct {
 	Cwd              string                 `json:"cwd,omitempty"`
 	ToolName         string                 `json:"tool_name,omitempty"`
 	ToolUseID        string                 `json:"tool_use_id,omitempty"`
+	AgentID          string                 `json:"agent_id,omitempty"` // subagent identity (SubagentStart/SubagentStop)
 	ToolInput        map[string]interface{} `json:"tool_input,omitempty"`
 	NotificationType string                 `json:"notification_type,omitempty"`
 	AgentType        string                 `json:"agent_type,omitempty"`

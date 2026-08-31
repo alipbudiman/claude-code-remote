@@ -14,8 +14,13 @@ const (
 var hookEvents = []string{
 	"SessionStart",
 	"SessionEnd",
+	// Turn lifecycle: UserPromptSubmit opens a turn, Stop closes it. The
+	// event-driven state machine keys on these two.
+	"UserPromptSubmit",
 	"Stop",
+	"StopFailure",
 	"PermissionRequest",
+	"PermissionDenied",
 	"Notification",
 	"PreToolUse",
 	"PostToolUse",
@@ -24,11 +29,12 @@ var hookEvents = []string{
 	"SubagentStop",
 	"TeammateIdle",
 	"TaskCompleted",
+	"PreCompact",
 }
 
 // HookEntry represents a Claude Code hook entry in settings.json
 type HookEntry struct {
-	Matcher string      `json:"matcher"`
+	Matcher string       `json:"matcher"`
 	Hooks   []HookAction `json:"hooks"`
 }
 

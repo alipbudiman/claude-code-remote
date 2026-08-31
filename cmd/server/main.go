@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"claude-remote-server/internal/api"
 	"claude-remote-server/internal/auth"
@@ -32,17 +33,23 @@ func main() {
 	portFlag := flag.Int("port", 9280, "Port for local server to listen on (binds to 0.0.0.0)")
 	noHooksFlag := flag.Bool("no-hooks", false, "Disable auto-installation of Claude Code hooks")
 	noWatchFlag := flag.Bool("no-watch", false, "Disable JSONL transcript file watcher")
+	idleTimeoutFlag := flag.String("idle-timeout", "300s", "How long a session may receive no hook events before it is marked stalled (e.g. 300s, 2m30s)")
 	flag.Parse()
 
 	fmt.Println(banner)
 
+	idleTimeout, err := time.ParseDuration(*idleTimeoutFlag)
+	if err != nil {
+		log.Fatalf("Fatal: invalid -idle-timeout %q: %v (use values like 300s or 2m30s)", *idleTimeoutFlag, err)
+	}
+
 	port := *portFlag
 	hostIPs := network.GetLocalIPs()
 
-	// 1. Initialize Thread-safe State Store & Start Liveness Engine
-	store := state.NewStore(port, hostIPs)
+	// 1. Initialize Thread-safe State Store & Start Liveness Fallback Engine
+	store := state.NewStoreWithIdleTimeout(port, hostIPs, idleTimeout)
 	store.StartLivenessWatcher()
-	fmt.Println("✅ Task Completion & Liveness auto-checking active (1s polling)")
+	fmt.Printf("✅ Event-driven turn tracking active; liveness fallback auto-checks every 1s (stall after %s of silence)\n", idleTimeout)
 
 	// 1b. Load (or create) the shared-secret auth token guarding /api/* and /ws
 	token, err := auth.LoadOrCreateToken()

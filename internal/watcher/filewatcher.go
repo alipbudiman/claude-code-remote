@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/models"
 	"claude-remote-server/internal/state"
 )
@@ -100,7 +99,7 @@ func (tw *TranscriptWatcher) scanProjectDir(projectDir string) {
 
 func (tw *TranscriptWatcher) processTranscriptFile(sessionID, projectDir, filePath string) {
 	tw.mu.Lock()
-	offset := tw.fileOffsets[filePath]
+	offset, seenBefore := tw.fileOffsets[filePath]
 	tw.mu.Unlock()
 
 	f, err := os.Open(filePath)
@@ -110,13 +109,33 @@ func (tw *TranscriptWatcher) processTranscriptFile(sessionID, projectDir, filePa
 	defer f.Close()
 
 	stat, err := f.Stat()
-	if err != nil || stat.Size() <= offset {
+	if err != nil {
 		return
 	}
 
-	// First time seeing this file: start near end if file is huge, or read all
-	if offset == 0 && stat.Size() > 50000 {
+	// Truncated/rotated transcript (file shrank below our last read
+	// position): restart from the beginning so new content is not missed.
+	if stat.Size() < offset {
+		offset = 0
+	}
+
+	// First sighting of a transcript not written to within the last 10
+	// minutes: record the current end offset and skip, so a boot-time scan
+	// never resurrects historical sessions as phantoms.
+	if !seenBefore && time.Since(stat.ModTime()) > 10*time.Minute {
+		tw.mu.Lock()
+		tw.fileOffsets[filePath] = stat.Size()
+		tw.mu.Unlock()
+		return
+	}
+
+	// First time reading a large live file: start near the end.
+	if !seenBefore && offset == 0 && stat.Size() > 50000 {
 		offset = stat.Size() - 25000
+	}
+
+	if stat.Size() <= offset {
+		return
 	}
 
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
@@ -175,7 +194,9 @@ func (tw *TranscriptWatcher) handleTranscriptRecord(sess *models.Session, record
 					toolID, _ := block["id"].(string)
 					input, _ := block["input"].(map[string]interface{})
 
-					toolStatus := hooks.FormatToolStatus(toolName, input)
+					// Watcher-synthesized events are a redundancy channel:
+					// Source="watcher" lets the store dedup replays of ids
+					// the hooks already delivered and suppress notifications.
 					tw.store.HandleHookEvent(models.HookPayload{
 						HookEventName: "PreToolUse",
 						SessionID:     sess.ID,
@@ -183,8 +204,8 @@ func (tw *TranscriptWatcher) handleTranscriptRecord(sess *models.Session, record
 						ToolUseID:     toolID,
 						ToolInput:     input,
 						Cwd:           sess.ProjectDir,
+						Source:        "watcher",
 					})
-					_ = toolStatus
 				}
 			}
 		}
