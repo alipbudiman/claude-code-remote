@@ -42,23 +42,59 @@ func main() {
 	if err != nil {
 		log.Fatalf("Fatal: invalid -idle-timeout %q: %v (use values like 300s or 2m30s)", *idleTimeoutFlag, err)
 	}
+	if idleTimeout < 0 {
+		log.Fatalf("Fatal: -idle-timeout must not be negative, got %q", *idleTimeoutFlag)
+	}
 
 	port := *portFlag
 	hostIPs := network.GetLocalIPs()
 
-	// 1. Initialize Thread-safe State Store & Start Liveness Fallback Engine
+	// 1. Initialize Thread-safe State Store
 	store := state.NewStoreWithIdleTimeout(port, hostIPs, idleTimeout)
+
+	// 1a. Durable ingestion: replay the raw event log (rebuilds sessions from
+	// the last 24h of accepted events), then drain any hook events the bridge
+	// spooled while the server was down. Both run BEFORE the HTTP server
+	// starts listening, so replayed history never buzzes (Source-gated
+	// notifications) while spooled REAL events do notify on drain.
+	durableDir := hooks.GetClaudeDir()
+	if durableDir == "" {
+		log.Fatalf("Fatal: could not resolve home directory for durable state")
+	}
+	eventLog := state.NewEventLog(durableDir)
+	store.SetEventLog(eventLog)
+	if replayed, err := eventLog.Replay(store.HandleHookEvent); err != nil {
+		fmt.Printf("⚠️  Warning: event-log replay failed: %v\n", err)
+	} else if replayed > 0 {
+		fmt.Printf("✅ Replayed %d events from the last 24h of %s\n", replayed, eventLog.Path())
+	}
+	if drained, err := state.DrainSpool(durableDir, store.HandleHookEvent); err != nil {
+		fmt.Printf("⚠️  Warning: spool drain failed: %v\n", err)
+	} else if drained > 0 {
+		fmt.Printf("✅ Drained %d spooled hook events (delivered as real notifications)\n", drained)
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if _, err := state.DrainSpool(durableDir, store.HandleHookEvent); err != nil {
+				fmt.Printf("⚠️  Warning: spool drain failed: %v\n", err)
+			}
+		}
+	}()
+
+	// 1b. Liveness Fallback Engine
 	store.StartLivenessWatcher()
 	fmt.Printf("✅ Event-driven turn tracking active; liveness fallback auto-checks every 1s (stall after %s of silence)\n", idleTimeout)
 
-	// 1b. Load (or create) the shared-secret auth token guarding /api/* and /ws
+	// 2. Load (or create) the shared-secret auth token guarding /api/* and /ws
 	token, err := auth.LoadOrCreateToken()
 	if err != nil {
 		log.Fatalf("Fatal: could not load or create auth token: %v", err)
 	}
 	fmt.Println("✅ Auth token loaded from ~/.claude/claude-remote-token (required by all /api/* and /ws requests)")
 
-	// 2. Install Claude Code Hooks automatically
+	// 3. Install Claude Code Hooks automatically
 	if !*noHooksFlag {
 		if err := hooks.InstallClaudeHooks(port); err != nil {
 			fmt.Printf("⚠️  Warning: Failed to install Claude hooks: %v\n", err)
@@ -67,7 +103,7 @@ func main() {
 		}
 	}
 
-	// 3. Start Transcript File Watcher (Redundancy)
+	// 4. Start Transcript File Watcher (Redundancy; offsets persist across restarts)
 	if !*noWatchFlag {
 		fw := watcher.NewTranscriptWatcher(store)
 		fw.Start()
@@ -75,7 +111,7 @@ func main() {
 		fmt.Println("✅ JSONL Transcript file watcher active on ~/.claude/projects/")
 	}
 
-	// 4. Print Connectivity & QR Code (URL carries the auth token so a
+	// 5. Print Connectivity & QR Code (URL carries the auth token so a
 	// scanned client can authenticate immediately)
 	primaryURL := fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, token)
 	if len(hostIPs) > 0 {
@@ -99,7 +135,7 @@ func main() {
 	}
 	fmt.Printf("URL: %s\n\n", primaryURL)
 
-	// 5. Initialize & Start API Server
+	// 6. Initialize & Start API Server (after replay & spool drain)
 	srv := api.NewServer(port, store, web.EmbeddedFS, hostIPs, token)
 
 	// Graceful shutdown handling

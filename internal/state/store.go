@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -51,6 +52,9 @@ type Store struct {
 	// stallNotified supports anti-flap: at most one stalled notification per
 	// session per idle episode (reset whenever new activity arrives).
 	stallNotified map[string]bool
+	// eventLog, when set, durably records every accepted hook payload (see
+	// durable.go). Optional so tests and non-durable use stay untouched.
+	eventLog *EventLog
 }
 
 // NewStore initializes an empty state store with the default liveness timeout.
@@ -208,6 +212,15 @@ func (s *Store) GetOrCreateSession(sessionID, projectDir, transcriptPath string)
 	return sess
 }
 
+// SetEventLog attaches the durable raw-event log. From then on every payload
+// ACCEPTED by HandleHookEvent is appended as one JSON line (payloads dropped as
+// watcher replay duplicates are not accepted events). Passing nil detaches.
+func (s *Store) SetEventLog(l *EventLog) {
+	s.mu.Lock()
+	s.eventLog = l
+	s.mu.Unlock()
+}
+
 // toolCacheForLocked returns (creating if needed) the per-session tool id
 // cache. Caller must hold s.mu.
 func (s *Store) toolCacheForLocked(sessionID string) *toolIDCache {
@@ -270,6 +283,15 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		if payload.Source == "watcher" && alreadySeen {
 			s.mu.Unlock()
 			return
+		}
+	}
+
+	// Durable raw-event log: record every accepted payload exactly once.
+	// Appended while holding s.mu so the log order always equals state-apply
+	// order; the log's own mutex is a leaf, so no lock inversion is possible.
+	if s.eventLog != nil {
+		if err := s.eventLog.Append(payload); err != nil {
+			log.Printf("event log append failed: %v", err)
 		}
 	}
 
@@ -586,9 +608,11 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		Timestamp: time.Now(),
 	})
 
-	// The watcher is a redundancy channel: it may backfill state, but it must
-	// never raise heads-up notifications.
-	if notifTitle != "" && payload.Source != "watcher" {
+	// The watcher and the boot replay are redundancy/history channels: they
+	// may backfill state, but they must never raise heads-up notifications.
+	// Only live hook events (Source "") notify — this also covers spool
+	// drain, which feeds real events with Source "".
+	if notifTitle != "" && payload.Source == "" {
 		s.AddNotification(sess.ID, notifTitle, notifBody, notifType)
 	}
 }

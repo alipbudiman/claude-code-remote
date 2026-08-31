@@ -9,6 +9,7 @@ import (
 
 const (
 	hookScriptName = "claude-remote-hook.js"
+	spoolFileName  = "claude-remote-hook.spool.jsonl"
 )
 
 var hookEvents = []string{
@@ -67,12 +68,44 @@ func EnsureHookBridgeScript(port int) (string, error) {
 
 	scriptPath := filepath.Join(claudeDir, hookScriptName)
 
-	// JavaScript script that reads JSON from stdin and sends it to our Go server
+	// JavaScript script that reads JSON from stdin and sends it to our Go server.
+	// On delivery failure (request error or timeout) the payload is spooled to
+	// claude-remote-hook.spool.jsonl so the server can drain it on restart —
+	// no event is ever permanently lost while the server is down.
 	scriptContent := fmt.Sprintf(`// Claude Remote Session Monitor Hook Bridge
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+// Spool bounds: trim the spool once it passes the cheap size check (256KB),
+// keeping only the most recent lines (max 1000).
+const SPOOL_MAX_BYTES = 256 * 1024;
+const SPOOL_MAX_LINES = 1000;
+
+// Append the serialized payload as ONE line to the spool file so the server
+// can replay it when it comes back up. Synchronous, no fsync, to stay well
+// inside the 1.5s script budget; every failure is swallowed so Claude Code
+// execution is never interrupted.
+function spool(postData) {
+  try {
+    const p = path.join(os.homedir(), '.claude', '%s');
+    try {
+      const st = fs.statSync(p);
+      if (st.size > SPOOL_MAX_BYTES) {
+        const lines = fs.readFileSync(p, 'utf8').split('\n').filter(function (l) {
+          return l.length > 0;
+        });
+        fs.writeFileSync(p, lines.slice(-SPOOL_MAX_LINES).join('\n') + '\n', 'utf8');
+      }
+    } catch (e) {
+      // No spool file yet — nothing to trim.
+    }
+    fs.appendFileSync(p, postData + '\n', 'utf8');
+  } catch (e) {
+    // Spooling failed; still exit cleanly.
+  }
+}
 
 // Read the shared auth token synchronously at script start so it is always
 // available before the POST fires. Fail-safe: empty string when unavailable.
@@ -123,19 +156,22 @@ process.stdin.on('end', () => {
   });
 
   req.on('error', () => {
-    // Fail silently so Claude Code execution is never interrupted
+    // Server unreachable: spool for later replay, then fail silently so
+    // Claude Code execution is never interrupted.
+    spool(postData);
     process.exit(0);
   });
 
   req.on('timeout', () => {
     req.destroy();
+    spool(postData);
     process.exit(0);
   });
 
   req.write(postData);
   req.end();
 });
-`, port)
+`, spoolFileName, port)
 
 	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
 		return "", err
