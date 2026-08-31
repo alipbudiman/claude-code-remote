@@ -6,6 +6,7 @@ type ConnectionHandler = (connected: boolean) => void;
 class WebSocketService {
   private ws: WebSocket | null = null;
   private serverUrl: string = '';
+  private token: string = '';
   private messageHandlers: Set<MessageHandler> = new Set();
   private connectionHandlers: Set<ConnectionHandler> = new Set();
   private reconnectTimer: number | null = null;
@@ -36,22 +37,73 @@ class WebSocketService {
         this.serverUrl = 'http://192.168.100.48:9280';
       }
     }
+
+    // Load the saved auth token (server requires it on /ws and /api/*)
+    try {
+      this.token = localStorage.getItem('claude_server_token') || '';
+    } catch {
+      this.token = '';
+    }
   }
 
   public getServerUrl(): string {
     return this.serverUrl;
   }
 
+  public getToken(): string {
+    return this.token;
+  }
+
+  public setToken(token: string) {
+    const next = token.trim();
+    if (!next) {
+      // Empty means "nothing entered" (e.g. the token field was left blank
+      // while pasting a token-bearing URL). Never destroy a working stored
+      // token; just reconnect with the current values.
+      this.reconnect();
+      return;
+    }
+    this.token = next;
+    try {
+      localStorage.setItem('claude_server_token', next);
+    } catch {
+      // Storage safe
+    }
+    this.reconnect();
+  }
+
   public setServerUrl(url: string) {
-    url = url.trim().replace(/\/$/, '');
+    url = url.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       url = 'http://' + url;
     }
+
+    // The server's canonical/QR URL ends with /?token=<64hex>. Extract an
+    // inline token (seeded via setToken below) and keep only the
+    // scheme/host/port/path so later URL building stays correct.
+    let inlineToken = '';
+    try {
+      const parsed = new URL(url);
+      inlineToken = (parsed.searchParams.get('token') || '').trim();
+      url = parsed.origin + parsed.pathname;
+    } catch {
+      // Unparseable input: strip query/hash manually.
+      url = url.split('#')[0].split('?')[0];
+    }
+    url = url.replace(/\/+$/, '');
+
     this.serverUrl = url;
     try {
       localStorage.setItem('claude_server_url', url);
     } catch {
       // Storage safe
+    }
+
+    if (inlineToken) {
+      // Seed the token through setToken(): persists it to localStorage and
+      // reconnects once with both the cleaned URL and the token applied.
+      this.setToken(inlineToken);
+      return;
     }
     this.reconnect();
   }
@@ -70,7 +122,9 @@ class WebSocketService {
       const wsUrl = `${wsProtocol}//${httpUrl.host}/ws`;
 
       console.log(`[WebSocket] Connecting to ${wsUrl}...`);
-      this.ws = new WebSocket(wsUrl);
+      // Browser JS cannot set headers on a WS handshake, so the token rides
+      // the Sec-WebSocket-Protocol subprotocol instead.
+      this.ws = new WebSocket(wsUrl, this.token ? ['claude-remote.' + this.token] : undefined);
 
       this.ws.onopen = () => {
         console.log('[WebSocket] Connected successfully');
@@ -120,6 +174,9 @@ class WebSocketService {
   }
 
   public reconnect() {
+    // Clear the connecting flag: we are deliberately aborting any in-flight
+    // attempt so back-to-back setServerUrl()/setToken() calls both dial.
+    this.isConnecting = false;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -147,7 +204,10 @@ class WebSocketService {
 
   public async fetchStatus(): Promise<ServerStateSnapshot | null> {
     try {
-      const res = await fetch(`${this.serverUrl}/api/status`);
+      const url = this.token
+        ? `${this.serverUrl}/api/status?token=${encodeURIComponent(this.token)}`
+        : `${this.serverUrl}/api/status`;
+      const res = await fetch(url);
       if (!res.ok) throw new Error('Status request failed');
       return await res.json();
     } catch (e) {

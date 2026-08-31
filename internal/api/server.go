@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,13 +19,9 @@ import (
 	"claude-remote-server/internal/state"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow LAN connections from Android APK and web clients
-	},
-}
+// androidWebViewOrigin is the Origin the Android APK WebView sends for every
+// request (it serves the bundled dashboard from this virtual https origin).
+const androidWebViewOrigin = "https://appassets.androidplatform.net"
 
 // Server encapsulates the HTTP and WebSocket API router
 type Server struct {
@@ -31,16 +30,29 @@ type Server struct {
 	embeddedFS embed.FS
 	mux        *http.ServeMux
 	hostIPs    []string
+	token      string
+	upgrader   websocket.Upgrader
 }
 
-// NewServer initializes an API server with all routes configured
-func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []string) *Server {
+// NewServer initializes an API server with all routes configured. The token
+// is the shared secret required by every /api/* endpoint and the /ws upgrade.
+func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []string, token string) *Server {
 	s := &Server{
 		port:       port,
 		store:      store,
 		embeddedFS: embeddedFS,
 		mux:        http.NewServeMux(),
 		hostIPs:    hostIPs,
+		token:      token,
+	}
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		// Offer the authenticated subprotocol so gorilla/websocket echoes
+		// it back to browser/WebView clients, which cannot set handshake
+		// headers (this is what makes their /ws connection succeed).
+		Subprotocols: []string{"claude-remote." + token},
+		CheckOrigin:  s.originAllowed,
 	}
 
 	s.setupRoutes()
@@ -49,35 +61,97 @@ func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []stri
 
 // setupRoutes registers all HTTP handlers, WebSocket endpoints, and static routes
 func (s *Server) setupRoutes() {
-	// CORS Middleware wrapper
-	withCORS := func(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			next(w, r)
-		}
+	// Auth + CORS gate for /api/* endpoints. CORS wraps the token check so
+	// OPTIONS preflights (which cannot carry credentials) are answered
+	// before authentication.
+	apiGate := func(h http.HandlerFunc) http.Handler {
+		return s.withCORS(s.requireToken(h))
 	}
 
 	// 1. Claude Code Hook Receiver Endpoint
-	s.mux.HandleFunc("/api/hook", withCORS(s.handleHookPost))
+	s.mux.Handle("/api/hook", apiGate(s.handleHookPost))
 
 	// 2. WebSocket Real-Time Stream Endpoint
-	s.mux.HandleFunc("/ws", s.handleWebSocket)
+	s.mux.Handle("/ws", s.requireToken(http.HandlerFunc(s.handleWebSocket)))
 
 	// 3. REST Endpoints
-	s.mux.HandleFunc("/api/status", withCORS(s.handleStatus))
-	s.mux.HandleFunc("/api/sessions", withCORS(s.handleSessions))
-	s.mux.HandleFunc("/api/subagents", withCORS(s.handleSubagents))
-	s.mux.HandleFunc("/api/qr", withCORS(s.handleQRCode))
-	s.mux.HandleFunc("/api/install-hooks", withCORS(s.handleInstallHooks))
+	s.mux.Handle("/api/status", apiGate(s.handleStatus))
+	s.mux.Handle("/api/sessions", apiGate(s.handleSessions))
+	s.mux.Handle("/api/subagents", apiGate(s.handleSubagents))
+	s.mux.Handle("/api/qr", apiGate(s.handleQRCode))
+	s.mux.Handle("/api/install-hooks", apiGate(s.handleInstallHooks))
 
-	// 4. Embedded Web UI Dashboard
+	// 4. Embedded Web UI Dashboard (static HTML only, no data — ungated)
 	s.mux.HandleFunc("/", s.handleStaticWeb)
+}
+
+// requireToken gates a handler behind the shared-secret token. Accepted in
+// this order: "Authorization: Bearer <tok>" header, "?token=<tok>" query
+// parameter, or the "Sec-WebSocket-Protocol: claude-remote.<tok>" handshake
+// header (the only option available to browser/WebView JS).
+func (s *Server) requireToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if tok == "" {
+			tok = r.URL.Query().Get("token")
+		}
+		if tok == "" {
+			for _, p := range websocket.Subprotocols(r) {
+				if strings.HasPrefix(p, "claude-remote.") {
+					tok = strings.TrimPrefix(p, "claude-remote.")
+				}
+			}
+		}
+		// Fail closed: an empty configured token must never authenticate.
+		if s.token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originAllowed is the shared Origin allowlist used by both the WebSocket
+// CheckOrigin hook and the CORS middleware. It allows:
+//
+//	(a) requests with no Origin header (non-browser clients: the Node hook
+//	    bridge, curl, PowerShell),
+//	(b) the Android APK WebView origin,
+//	(c) same-origin requests: any http://<host>:<port> whose host equals
+//	    the request's Host header.
+//
+// Everything else is rejected.
+func (s *Server) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // non-browser client
+	}
+	if origin == androidWebViewOrigin {
+		return true // Android APK WebView
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host) // same-origin
+}
+
+// withCORS emits CORS headers for /api/* responses, echoing the request's
+// Origin only when it passes the originAllowed allowlist.
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +186,7 @@ func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}

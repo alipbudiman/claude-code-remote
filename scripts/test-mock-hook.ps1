@@ -1,5 +1,14 @@
 # PowerShell script to test sending mock hook events to local server
 
+# All /api/* endpoints require the shared-secret token (see internal/auth).
+$tokenFile = Join-Path $env:USERPROFILE ".claude\claude-remote-token"
+$token = ""
+try { $token = (Get-Content $tokenFile -Raw).Trim() } catch { $token = "" }
+if (-not $token) {
+    Write-Warning "Token file not found or empty at $tokenFile - requests will get 401 Unauthorized. Start the server once to generate it."
+}
+$headers = @{ Authorization = "Bearer $token" }
+
 Write-Host "1. Testing Task/Tool Start Event..." -ForegroundColor Cyan
 $payload1 = @{
     hook_event_name = "PreToolUse"
@@ -12,7 +21,7 @@ $payload1 = @{
     }
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload1 -ContentType "application/json"
+Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload1 -ContentType "application/json" -Headers $headers
 Start-Sleep -Seconds 2
 
 Write-Host "2. Testing Sub-Agent Spawn Event..." -ForegroundColor Yellow
@@ -26,7 +35,7 @@ $payload2 = @{
     tool_use_id = "subagent-99"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload2 -ContentType "application/json"
+Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload2 -ContentType "application/json" -Headers $headers
 Start-Sleep -Seconds 3
 
 Write-Host "3. Testing Turn Stop / Idling Event..." -ForegroundColor Green
@@ -36,6 +45,6 @@ $payload3 = @{
     cwd = "d:\CODING\claude-status-apk"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload3 -ContentType "application/json"
+Invoke-RestMethod -Uri "http://127.0.0.1:9280/api/hook" -Method Post -Body $payload3 -ContentType "application/json" -Headers $headers
 
 Write-Host "`nAll test events dispatched successfully! Check mobile/web dashboard." -ForegroundColor Green

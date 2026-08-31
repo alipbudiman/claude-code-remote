@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Network, Check, RefreshCw, Smartphone } from 'lucide-react';
+import { X, Network, Check, RefreshCw, Smartphone, KeyRound } from 'lucide-react';
+import { wsService } from '../services/websocketService';
 
 interface ConnectionModalProps {
   isOpen: boolean;
@@ -19,12 +20,14 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   onSaveUrl,
 }) => {
   const [inputUrl, setInputUrl] = useState(currentUrl);
+  const [inputToken, setInputToken] = useState(wsService.getToken());
 
   if (!isOpen) return null;
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSaveUrl(inputUrl);
+    wsService.setToken(inputToken);
     onClose();
   };
 
@@ -70,6 +73,27 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
             />
             <p className="text-[11px] text-slate-500 mt-1">
               Example: <code>http://192.168.100.48:9280</code> (binds on 0.0.0.0, no internet required)
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+              Token
+            </label>
+            <div className="relative">
+              <KeyRound size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
+              <input
+                type="password"
+                value={inputToken}
+                onChange={(e) => setInputToken(e.target.value)}
+                placeholder="64-char token from desktop QR / URL"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full pl-9 pr-4 py-3 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]"
+              />
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Authentication token — scan the desktop QR code or copy <code>?token=...</code> from the server URL
             </p>
           </div>
 

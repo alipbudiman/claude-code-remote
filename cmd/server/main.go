@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"claude-remote-server/internal/api"
+	"claude-remote-server/internal/auth"
 	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/network"
 	"claude-remote-server/internal/state"
@@ -43,6 +44,13 @@ func main() {
 	store.StartLivenessWatcher()
 	fmt.Println("✅ Task Completion & Liveness auto-checking active (1s polling)")
 
+	// 1b. Load (or create) the shared-secret auth token guarding /api/* and /ws
+	token, err := auth.LoadOrCreateToken()
+	if err != nil {
+		log.Fatalf("Fatal: could not load or create auth token: %v", err)
+	}
+	fmt.Println("✅ Auth token loaded from ~/.claude/claude-remote-token (required by all /api/* and /ws requests)")
+
 	// 2. Install Claude Code Hooks automatically
 	if !*noHooksFlag {
 		if err := hooks.InstallClaudeHooks(port); err != nil {
@@ -60,10 +68,11 @@ func main() {
 		fmt.Println("✅ JSONL Transcript file watcher active on ~/.claude/projects/")
 	}
 
-	// 4. Print Connectivity & QR Code
-	primaryURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	// 4. Print Connectivity & QR Code (URL carries the auth token so a
+	// scanned client can authenticate immediately)
+	primaryURL := fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, token)
 	if len(hostIPs) > 0 {
-		primaryURL = fmt.Sprintf("http://%s:%d", hostIPs[0], port)
+		primaryURL = fmt.Sprintf("http://%s:%d/?token=%s", hostIPs[0], port, token)
 	}
 
 	fmt.Println("\n------------------------------------------------------------------------")
@@ -84,7 +93,7 @@ func main() {
 	fmt.Printf("URL: %s\n\n", primaryURL)
 
 	// 5. Initialize & Start API Server
-	srv := api.NewServer(port, store, web.EmbeddedFS, hostIPs)
+	srv := api.NewServer(port, store, web.EmbeddedFS, hostIPs, token)
 
 	// Graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)

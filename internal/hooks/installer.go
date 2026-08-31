@@ -64,6 +64,18 @@ func EnsureHookBridgeScript(port int) (string, error) {
 	// JavaScript script that reads JSON from stdin and sends it to our Go server
 	scriptContent := fmt.Sprintf(`// Claude Remote Session Monitor Hook Bridge
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// Read the shared auth token synchronously at script start so it is always
+// available before the POST fires. Fail-safe: empty string when unavailable.
+let authToken = '';
+try {
+  authToken = fs.readFileSync(path.join(os.homedir(), '.claude', 'claude-remote-token'), 'utf8').trim();
+} catch (e) {
+  authToken = '';
+}
 
 let inputData = '';
 process.stdin.setEncoding('utf-8');
@@ -85,15 +97,19 @@ process.stdin.on('end', () => {
   }
 
   const postData = JSON.stringify(payload);
+  const headers = {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(postData)
+  };
+  if (authToken) {
+    headers['Authorization'] = 'Bearer ' + authToken;
+  }
   const req = http.request({
     hostname: '127.0.0.1',
     port: %d,
     path: '/api/hook',
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData)
-    },
+    headers: headers,
     timeout: 1500
   }, (res) => {
     res.resume();
