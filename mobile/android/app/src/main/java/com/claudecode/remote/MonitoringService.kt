@@ -17,6 +17,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -41,6 +42,13 @@ import java.util.concurrent.atomic.AtomicLong
  * heads-up alerts, only this service fires popup notifications for live
  * server "notification" frames.
  *
+ * M4b adds two reliability pieces: (1) the server broadcasts a lightweight
+ * "stats" frame every 20s, which keeps [lastMessageAt] fresh during quiet
+ * stretches so the staleness watchdog stops force-reconnecting healthy
+ * links; (2) a persisted notification-id watermark replays alerts that were
+ * raised server-side while this service was disconnected (initial_state
+ * snapshot diff — see [replayMissedNotifications]).
+ *
  * Foreground service type is dataSync:
  *  - Android 14+: requires the FOREGROUND_SERVICE_DATA_SYNC permission.
  *  - Android 15: cumulative dataSync time is capped at ~6h per 24h; the
@@ -57,6 +65,21 @@ class MonitoringService : Service() {
         const val PREF_SERVER_URL = "server_url"
         const val PREF_TOKEN = "token"
 
+        /**
+         * M4b missed-alert watermark: id of the newest notification this
+         * service has ever alerted. Notification ids are "notif-<UnixNano>";
+         * only the numeric suffix is stored/compared. Kept in the same prefs
+         * so alerts raised while disconnected are replayed from the next
+         * initial_state snapshot instead of being silently lost (RC-A5).
+         */
+        const val PREF_LAST_NOTIF_ID = "last_seen_notification_id"
+
+        /** At most this many missed notifications are re-alerted on reconnect. */
+        private const val MAX_REPLAY_ALERTS = 10
+
+        /** Sentinel: no watermark loaded/stored yet (first run after install). */
+        private const val WATERMARK_UNLOADED = Long.MIN_VALUE
+
         private const val NORMAL_CLOSE = 1000
 
         /** Exponential reconnect backoff: 1s doubling to 60s, +/-25% jitter. */
@@ -65,10 +88,11 @@ class MonitoringService : Service() {
 
         /**
          * Staleness watchdog: check every 30s; force a reconnect if connected
-         * but no data frame has arrived for 45s. NOTE: WebSocket pong/control
-         * frames are not surfaced to OkHttp's listener, so "no data" can also
-         * mean a healthy-but-idle session; the forced reconnect then simply
-         * re-fetches a fresh snapshot, keeping the notification honest.
+         * but no data frame has arrived for 45s. Since M4b the server
+         * broadcasts a stats heartbeat every 20s, so a healthy-but-idle link
+         * keeps the clock fresh and this only fires on genuinely dead links
+         * (WebSocket pong/control frames still never reach OkHttp's listener,
+         * which is why the app-level heartbeat exists).
          */
         private const val WATCHDOG_CHECK_MS = 30_000L
         private const val STALE_AFTER_MS = 45_000L
@@ -108,6 +132,14 @@ class MonitoringService : Service() {
     private var watchdogRunning = false
     private var finalNoticePosted = false
 
+    /**
+     * M4b replay watermark (main thread only, like the fields above): nano
+     * suffix of the newest alerted notification id, or [WATERMARK_UNLOADED]
+     * until prefs have been read. An unparsable/absent stored value keeps the
+     * first-run behavior (adopt newest silently).
+     */
+    private var lastSeenNotifNanos: Long = WATERMARK_UNLOADED
+
     // ------------------------------------------------------------------------- lifecycle
 
     override fun onCreate() {
@@ -132,6 +164,12 @@ class MonitoringService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val url = prefs.getString(PREF_SERVER_URL, null)?.trim().orEmpty()
         val token = prefs.getString(PREF_TOKEN, null)?.trim().orEmpty()
+
+        // M4b: load the missed-alert watermark once, before any frame can
+        // arrive (frames only flow after the connection starts below).
+        if (lastSeenNotifNanos == WATERMARK_UNLOADED) {
+            parseNotifNanos(prefs.getString(PREF_LAST_NOTIF_ID, null))?.let { lastSeenNotifNanos = it }
+        }
 
         if (url.isEmpty() || token.isEmpty()) {
             // Fresh install before the user ever saved connection settings.
@@ -355,9 +393,13 @@ class MonitoringService : Service() {
 
         override fun onMessage(ws: WebSocket, text: String) {
             // OkHttp reader thread. Control frames (pings/pongs) never appear
-            // here, so this really is the "last data" clock.
+            // here, so this really is the "last data" clock — including the
+            // server's 20s stats heartbeat, which keeps a healthy-but-idle
+            // link from looking stale. Actual parsing/dispatch happens on the
+            // main thread like the other callbacks, gated to the current
+            // socket so a superseded connection cannot mutate state.
             lastMessageAt.set(SystemClock.elapsedRealtime())
-            handleFrame(text)
+            mainHandler.post { if (isCurrent(ws)) handleFrame(text) }
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
@@ -394,24 +436,103 @@ class MonitoringService : Service() {
             return
         }
         when (root.optString("type")) {
-            "initial_state" -> applySession(root.optJSONObject("data")?.optJSONObject("active_session"))
+            "initial_state" -> handleInitialState(root.optJSONObject("data"))
             "session_update" -> applySession(root.optJSONObject("data"))
-            "notification" -> {
-                // M4a scope: fire every live notification frame (mirrors the
-                // old JS behavior; the JS path no longer does this). M4b adds
-                // missed-alert replay + watermark.
-                val data = root.optJSONObject("data") ?: return
-                notificationHelper.showPopupAlertNotification(
-                    data.optString("title"),
-                    data.optString("body"),
-                    data.optString("type", "info")
-                )
+            "notification" -> handleLiveNotification(root.optJSONObject("data"))
+            "stats" -> {
+                // Liveness only: onMessage already refreshed lastMessageAt.
+                // No notification update — never churn the shade every 20s.
             }
             else -> {
-                // "stats", "subagent_update", future types: the notification
-                // only needs session state, which session_update carries.
+                // "subagent_update", future types: the notification only
+                // needs session state, which session_update carries.
             }
         }
+    }
+
+    private fun handleInitialState(data: JSONObject?) {
+        applySession(data?.optJSONObject("active_session"))
+        // M4b: the snapshot carries the full (newest-first) notification
+        // list — diff it against the watermark to replay missed alerts.
+        replayMissedNotifications(data?.optJSONArray("notifications"))
+    }
+
+    /** Live frame: fire the heads-up (M4a behavior) and advance the watermark. */
+    private fun handleLiveNotification(data: JSONObject?) {
+        if (data == null) return
+        notificationHelper.showPopupAlertNotification(
+            data.optString("title"),
+            data.optString("body"),
+            data.optString("type", "info")
+        )
+        parseNotifNanos(data.optString("id"))?.let { advanceWatermark(it) }
+    }
+
+    // ------------------------------------------------------------------------- missed-alert replay (M4b, root cause RC-A5)
+
+    /**
+     * Re-alerts notifications raised server-side while this service was
+     * disconnected, diffing the initial_state snapshot (newest-first) against
+     * the persisted watermark.
+     *
+     * First run (no stored watermark): adopt the newest id silently so a
+     * fresh install never buzzes through stored history. Otherwise every
+     * entry strictly newer than the watermark is replayed oldest→newest,
+     * bounded to the [MAX_REPLAY_ALERTS] most recent — older missed ones are
+     * stale history and only advance the watermark, silently.
+     */
+    private fun replayMissedNotifications(notifs: JSONArray?) {
+        if (notifs == null || notifs.length() == 0) return
+
+        if (lastSeenNotifNanos == WATERMARK_UNLOADED) {
+            // First run: set the watermark to the newest seen WITHOUT alerting.
+            parseNotifNanos(notifs.optJSONObject(0)?.optString("id"))?.let { advanceWatermark(it) }
+            return
+        }
+
+        // Collect strictly-newer entries; index 0 is the newest. Unparsable
+        // ids compare as older and are skipped entirely.
+        val missed = ArrayList<JSONObject>(8)
+        var newestNanos = lastSeenNotifNanos
+        for (i in 0 until notifs.length()) {
+            val notif = notifs.optJSONObject(i) ?: continue
+            val nanos = parseNotifNanos(notif.optString("id")) ?: continue
+            if (nanos <= lastSeenNotifNanos) continue
+            if (nanos > newestNanos) newestNanos = nanos
+            missed.add(notif)
+        }
+        if (missed.isEmpty()) return
+
+        val alertCount = missed.size.coerceAtMost(MAX_REPLAY_ALERTS)
+        for (i in alertCount - 1 downTo 0) { // oldest → newest of the most recent
+            notificationHelper.showPopupAlertNotification(
+                missed[i].optString("title"),
+                missed[i].optString("body"),
+                missed[i].optString("type", "info")
+            )
+        }
+        advanceWatermark(newestNanos)
+    }
+
+    /** Moves the watermark forward (never backward) and persists it. */
+    private fun advanceWatermark(nanos: Long) {
+        if (nanos <= lastSeenNotifNanos) return
+        lastSeenNotifNanos = nanos
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_LAST_NOTIF_ID, "notif-$nanos")
+            .apply()
+    }
+
+    /**
+     * "notif-<UnixNano>" -> the nano suffix, or null when absent/unparsable
+     * (unparsable ids compare as older than any real watermark).
+     */
+    private fun parseNotifNanos(id: String?): Long? {
+        if (id == null) return null
+        val idx = id.lastIndexOf('-')
+        if (idx < 0) return null
+        return id.substring(idx + 1).toLongOrNull()
     }
 
     /** Mirrors App.tsx status semantics: working/waiting + subagent count. */

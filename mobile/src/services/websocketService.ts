@@ -3,6 +3,9 @@ import { ServerStateSnapshot, WebSocketMessage } from '../types';
 type MessageHandler = (msg: WebSocketMessage) => void;
 type ConnectionHandler = (connected: boolean) => void;
 
+/** M4b: consecutive failed dials on one base URL before trying the next host. */
+const FAILOVER_AFTER_FAILURES = 5;
+
 class WebSocketService {
   private ws: WebSocket | null = null;
   private serverUrl: string = '';
@@ -11,6 +14,16 @@ class WebSocketService {
   private connectionHandlers: Set<ConnectionHandler> = new Set();
   private reconnectTimer: number | null = null;
   private isConnecting: boolean = false;
+
+  // --- M4b: reconnect-on-wake + host_ips auto-failover state ---
+  /** Alternate server hosts (the snapshot's host_ips), probed round-robin. */
+  private failoverCandidates: string[] = [];
+  /** Consecutive failed dials against the current base URL. */
+  private consecutiveFailures = 0;
+  /** Round-robin cursor into failoverCandidates; -1 means "not probing yet". */
+  private candidateIndex = -1;
+  /** Candidate base URL currently being tried; null = use the saved URL. */
+  private activeCandidateUrl: string | null = null;
 
   constructor() {
     let savedUrl: string | null = null;
@@ -33,9 +46,10 @@ class WebSocketService {
         (origin.startsWith('http://') || origin.startsWith('https://'))
       ) {
         this.serverUrl = origin;
-      } else {
-        this.serverUrl = 'http://192.168.100.48:9280';
       }
+      // M4b: no hardcoded fallback anymore. With no saved URL and no usable
+      // origin, serverUrl stays '' — App opens the ConnectionModal on first
+      // launch instead of dialing an address that is almost never right.
     }
 
     // Load the saved auth token (server requires it on /ws and /api/*)
@@ -44,6 +58,14 @@ class WebSocketService {
     } catch {
       this.token = '';
     }
+
+    // M4b: mobile browsers park background timers/sockets aggressively, so
+    // force an immediate dial when the page becomes visible or the network
+    // returns — never wait out the 2.5s reconnect timer on a wake-up.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') this.ensureConnected();
+    });
+    window.addEventListener('online', () => this.ensureConnected());
   }
 
   public getServerUrl(): string {
@@ -72,6 +94,31 @@ class WebSocketService {
     this.reconnect();
   }
 
+  /** M4b: forget the stored token entirely and reconnect without one. */
+  public clearToken() {
+    this.token = '';
+    try {
+      localStorage.removeItem('claude_server_token');
+    } catch {
+      // Storage safe
+    }
+    this.reconnect();
+  }
+
+  /**
+   * M4b: alternate server hosts (the snapshot's host_ips). After
+   * FAILOVER_AFTER_FAILURES consecutive failed dials these are probed
+   * round-robin (same port as the saved URL, default 9280); the first one
+   * that connects is promoted to the saved URL.
+   */
+  public setFailoverCandidates(hosts: string[]) {
+    this.failoverCandidates = hosts.filter((h) => !!h);
+    if (this.candidateIndex >= this.failoverCandidates.length) {
+      this.candidateIndex = -1;
+      this.activeCandidateUrl = null;
+    }
+  }
+
   public setServerUrl(url: string) {
     url = url.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -93,6 +140,10 @@ class WebSocketService {
     url = url.replace(/\/+$/, '');
 
     this.serverUrl = url;
+    // Manual re-pointing resets any in-flight failover rotation.
+    this.activeCandidateUrl = null;
+    this.candidateIndex = -1;
+    this.consecutiveFailures = 0;
     try {
       localStorage.setItem('claude_server_url', url);
     } catch {
@@ -108,16 +159,35 @@ class WebSocketService {
     this.reconnect();
   }
 
+  /**
+   * M4b: immediate (re)dial when the page becomes visible / the network
+   * returns and the socket is not already open. Safe to call at any time.
+   */
+  private ensureConnected() {
+    if (!this.serverUrl) return; // nothing configured yet
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.isConnecting = false;
+    this.connect();
+  }
+
   public connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
     if (this.isConnecting) return;
+
+    // No base URL configured (first launch before the user saves one).
+    const base = this.activeCandidateUrl || this.serverUrl;
+    if (!base) return;
     this.isConnecting = true;
 
     try {
-      const httpUrl = new URL(this.serverUrl);
+      const httpUrl = new URL(base);
       const wsProtocol = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${wsProtocol}//${httpUrl.host}/ws`;
 
@@ -125,10 +195,29 @@ class WebSocketService {
       // Browser JS cannot set headers on a WS handshake, so the token rides
       // the Sec-WebSocket-Protocol subprotocol instead.
       this.ws = new WebSocket(wsUrl, this.token ? ['claude-remote.' + this.token] : undefined);
+      // Handlers are bound to THIS socket: a superseded one (reconnect() or
+      // failover dialed a replacement) must not corrupt the new attempt's
+      // state — notably its onclose must not count as a connect failure.
+      const sock = this.ws;
 
-      this.ws.onopen = () => {
+      sock.onopen = () => {
+        if (this.ws !== sock) return;
         console.log('[WebSocket] Connected successfully');
         this.isConnecting = false;
+        if (this.activeCandidateUrl) {
+          // Failover candidate answered: promote it to THE saved URL.
+          const promoted = this.activeCandidateUrl;
+          this.serverUrl = promoted;
+          this.activeCandidateUrl = null;
+          this.candidateIndex = -1;
+          try {
+            localStorage.setItem('claude_server_url', promoted);
+          } catch {
+            // Storage safe
+          }
+          console.log(`[WebSocket] Failover connected; saved ${promoted}`);
+        }
+        this.consecutiveFailures = 0;
         this.notifyConnection(true);
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
@@ -136,7 +225,8 @@ class WebSocketService {
         }
       };
 
-      this.ws.onmessage = (event) => {
+      sock.onmessage = (event) => {
+        if (this.ws !== sock) return;
         try {
           const msg: WebSocketMessage = JSON.parse(event.data);
           this.notifyMessage(msg);
@@ -145,14 +235,20 @@ class WebSocketService {
         }
       };
 
-      this.ws.onclose = () => {
+      sock.onclose = () => {
+        if (this.ws !== sock) return; // superseded: not a failure of the current attempt
         console.log('[WebSocket] Disconnected. Scheduling reconnect...');
         this.isConnecting = false;
         this.notifyConnection(false);
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures >= FAILOVER_AFTER_FAILURES) {
+          this.rotateFailoverCandidate();
+        }
         this.scheduleReconnect();
       };
 
-      this.ws.onerror = (err) => {
+      sock.onerror = (err) => {
+        if (this.ws !== sock) return;
         console.warn('[WebSocket] Error encountered', err);
         this.isConnecting = false;
         this.notifyConnection(false);
@@ -163,6 +259,36 @@ class WebSocketService {
       this.notifyConnection(false);
       this.scheduleReconnect();
     }
+  }
+
+  /**
+   * M4b: after FAILOVER_AFTER_FAILURES consecutive failures on the current
+   * base URL, move to the next known host. Simple round-robin, no mDNS.
+   */
+  private rotateFailoverCandidate() {
+    const candidates = this.failoverUrls();
+    if (candidates.length === 0) return; // nowhere to fail over to
+    this.candidateIndex = (this.candidateIndex + 1) % candidates.length;
+    this.activeCandidateUrl = candidates[this.candidateIndex] || null;
+    this.consecutiveFailures = 0;
+    if (this.activeCandidateUrl) {
+      console.warn(
+        `[WebSocket] ${FAILOVER_AFTER_FAILURES} failed attempts — trying ${this.activeCandidateUrl}`
+      );
+    }
+  }
+
+  /** Builds http://<ip>:<port> candidates from host_ips + the saved URL's port. */
+  private failoverUrls(): string[] {
+    if (this.failoverCandidates.length === 0 || !this.serverUrl) return [];
+    let port = '9280';
+    try {
+      const parsed = new URL(this.serverUrl);
+      if (parsed.port) port = parsed.port;
+    } catch {
+      // Saved URL unparseable: default port.
+    }
+    return this.failoverCandidates.map((ip) => `http://${ip}:${port}`);
   }
 
   private scheduleReconnect() {

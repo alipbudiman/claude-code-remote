@@ -150,6 +150,21 @@ func (s *Store) broadcast(msg models.WebSocketMessage) {
 	}
 }
 
+// BroadcastStats fans out a lightweight `stats` frame (the snapshot's
+// SystemSummary) to every subscriber. It exists for the server's periodic
+// heartbeat (M4b): app-level clients like OkHttp never surface pong control
+// frames, so they need periodic DATA traffic to tell a quiet-but-healthy link
+// from a dead one without force-reconnecting mid-alert. Pure liveness +
+// summary — it never mutates sessions and never raises notifications.
+func (s *Store) BroadcastStats() {
+	summary := s.GetSnapshot().SystemSummary
+	s.broadcast(models.WebSocketMessage{
+		Type:      "stats",
+		Data:      summary,
+		Timestamp: time.Now(),
+	})
+}
+
 // AddNotification adds a notification and broadcasts it
 func (s *Store) AddNotification(sessionID, title, body, notifType string) *models.AppNotification {
 	s.mu.Lock()

@@ -460,7 +460,10 @@ func newKeepaliveTestServer(t *testing.T, pingInterval time.Duration) *httptest.
 // (gorilla only dispatches ping handlers from a read loop). The installed
 // ping handler records pings and deliberately never answers them, which is
 // exactly the "client that stopped responding" case the keepalive exists for.
-func dialKeepaliveClient(t *testing.T, ts *httptest.Server, onPing func()) *websocket.Conn {
+// The returned channel receives the reader's terminal error (buffered, so the
+// goroutine never leaks) — the reader is the connection's ONLY reader because
+// gorilla/websocket permits a single concurrent ReadMessage caller.
+func dialKeepaliveClient(t *testing.T, ts *httptest.Server, onPing func()) (*websocket.Conn, <-chan error) {
 	t.Helper()
 	dialer := &websocket.Dialer{Subprotocols: []string{"claude-remote." + testToken}}
 	conn, _, err := dialer.Dial(wsURL(ts), nil)
@@ -475,15 +478,17 @@ func dialKeepaliveClient(t *testing.T, ts *httptest.Server, onPing func()) *webs
 		}
 		return nil // swallow the ping: never send a pong
 	})
+	closed := make(chan error, 1)
 	go func() {
 		for {
 			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			if _, _, err := conn.ReadMessage(); err != nil {
+				closed <- err
 				return
 			}
 		}
 	}()
-	return conn
+	return conn, closed
 }
 
 // M4a: the server must send WebSocket ping control frames on every /ws
@@ -514,18 +519,9 @@ func TestWSUnresponsiveClientReapedByReadDeadline(t *testing.T) {
 	// 40ms ping interval => 120ms read window (3x the interval).
 	ts := newKeepaliveTestServer(t, 40*time.Millisecond)
 
-	closed := make(chan error, 1)
-	conn := dialKeepaliveClient(t, ts, nil)
-	go func() {
-		for {
-			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				closed <- err
-				return
-			}
-		}
-	}()
+	// The helper's own reader goroutine is the single reader; its terminal
+	// error tells us the server tore the connection down.
+	_, closed := dialKeepaliveClient(t, ts, nil)
 
 	select {
 	case <-closed:
@@ -565,4 +561,53 @@ func TestWSResponsiveClientSurvivesReadDeadline(t *testing.T) {
 	if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("connection died while responding to pings: %v", err)
 	}
+}
+
+// --- M4b: periodic stats heartbeat ---
+
+// M4b: every /ws subscriber must periodically receive a lightweight `stats`
+// frame (pure liveness + SystemSummary — no session mutation, no heads-up).
+// App-level watchdogs need it because OkHttp never surfaces pong control
+// frames, so without data traffic a quiet-but-healthy link is indistinguishable
+// from a dead one and native clients force-reconnect, dropping live
+// notification frames into the dark window.
+func TestWSClientReceivesStatsHeartbeat(t *testing.T) {
+	srv := NewServer(0, state.NewStore(0, nil), web.EmbeddedFS, nil, testToken)
+	srv.statsInterval = 100 * time.Millisecond
+	srv.startStatsHeartbeat()
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	dialer := &websocket.Dialer{Subprotocols: []string{"claude-remote." + testToken}}
+	conn, _, err := dialer.Dial(wsURL(ts), nil)
+	if err != nil {
+		t.Fatalf("dial /ws: %v", err)
+	}
+	defer conn.Close()
+
+	// The first frame is initial_state; keep reading until a stats frame
+	// lands (at 100ms cadence that is well inside the ~1s budget).
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 16; i++ {
+		var msg map[string]interface{}
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("reading frame %d: %v", i, err)
+		}
+		if msg["type"] != "stats" {
+			continue
+		}
+		tsStr, ok := msg["timestamp"].(string)
+		if !ok || tsStr == "" {
+			t.Fatalf("stats frame timestamp = %v, want non-empty string", msg["timestamp"])
+		}
+		data, ok := msg["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("stats frame data = %T, want object", msg["data"])
+		}
+		if _, ok := data["total_sessions"]; !ok {
+			t.Fatalf("stats frame data missing total_sessions: %v", data)
+		}
+		return // first stats frame received — heartbeat is live
+	}
+	t.Fatal("no stats frame received within 2s of connecting; heartbeat is not running")
 }

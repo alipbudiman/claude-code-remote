@@ -11,6 +11,20 @@ interface ConnectionModalProps {
   onSaveUrl: (url: string) => void;
 }
 
+// M4b: a saveable URL must parse as an http(s) URL with a host. Mirrors
+// wsService.setServerUrl's "prepend http:// when the scheme is missing"
+// defaulting, so bare "192.168.1.15:9280" stays valid input.
+const isValidServerUrl = (raw: string): boolean => {
+  const s = raw.trim();
+  if (!s) return false;
+  const candidate = /^https?:\/\//i.test(s) ? s : `http://${s}`;
+  try {
+    return new URL(candidate).hostname.length > 0;
+  } catch {
+    return false;
+  }
+};
+
 export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   isOpen,
   onClose,
@@ -21,6 +35,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 }) => {
   const [inputUrl, setInputUrl] = useState(currentUrl);
   const [inputToken, setInputToken] = useState(wsService.getToken());
+  const [urlError, setUrlError] = useState(false);
 
   if (!isOpen) return null;
 
@@ -42,10 +57,23 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isValidServerUrl(inputUrl)) {
+      setUrlError(true);
+      return;
+    }
+    setUrlError(false);
     onSaveUrl(inputUrl);
     wsService.setToken(inputToken);
     syncNativeConfig();
     onClose();
+  };
+
+  // M4b: forget the token everywhere (localStorage + native service config,
+  // which reads getToken() === '' after clearToken) and reconnect without it.
+  const handleClearToken = () => {
+    setInputToken('');
+    wsService.clearToken();
+    syncNativeConfig();
   };
 
   const handleSelectIP = (ip: string) => {
@@ -85,19 +113,38 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
             <input
               type="text"
               value={inputUrl}
-              onChange={(e) => setInputUrl(e.target.value)}
+              onChange={(e) => {
+                setInputUrl(e.target.value);
+                if (urlError) setUrlError(false);
+              }}
               placeholder="http://192.168.1.15:9280"
-              className="w-full px-4 py-3 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]"
+              className={`w-full px-4 py-3 rounded-xl bg-black/40 border ${
+                urlError ? 'border-red-500/70' : 'border-white/10'
+              } text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]`}
             />
+            {urlError && (
+              <p className="text-[11px] text-red-400 mt-1">
+                Enter a valid server URL with a host, e.g. <code>http://192.168.1.15:9280</code>
+              </p>
+            )}
             <p className="text-[11px] text-slate-500 mt-1">
               Example: <code>http://192.168.100.48:9280</code> (binds on 0.0.0.0, no internet required)
             </p>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
-              Token
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Token
+              </label>
+              <button
+                type="button"
+                onClick={handleClearToken}
+                className="text-[11px] text-slate-500 hover:text-[#e88666] transition-colors"
+              >
+                Clear token
+              </button>
+            </div>
             <div className="relative">
               <KeyRound size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
               <input

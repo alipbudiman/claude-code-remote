@@ -35,6 +35,13 @@ const androidWebViewOrigin = "https://appassets.androidplatform.net"
 // (or any traffic) is torn down instead of pinning at "connected".
 const defaultPingInterval = 20 * time.Second
 
+// defaultStatsInterval is the app-level heartbeat cadence: every subscriber
+// is broadcast a lightweight `stats` frame this often (M4b). Control-frame
+// pongs never reach listeners like OkHttp's, so app clients need real data
+// traffic to distinguish "quiet" from "dead" — without it they force periodic
+// reconnects whose dark windows swallow live notification frames.
+const defaultStatsInterval = 20 * time.Second
+
 // wsWriteTimeout bounds every server-to-client write so a slow or wedged
 // client cannot block a broadcast or ping goroutine indefinitely.
 const wsWriteTimeout = 10 * time.Second
@@ -53,6 +60,17 @@ type Server struct {
 	// defaultPingInterval). Tests shrink it to keep the suite fast.
 	pingInterval time.Duration
 
+	// statsInterval is how often the `stats` heartbeat is broadcast to all
+	// subscribers (see defaultStatsInterval). Tests shrink it too.
+	statsInterval time.Duration
+
+	// statsStop closes to stop the stats heartbeat goroutine; start/stop are
+	// each guarded by a sync.Once so repeated Start()/Shutdown() calls stay
+	// safe.
+	statsStop      chan struct{}
+	statsStartOnce sync.Once
+	statsStopOnce  sync.Once
+
 	// httpServer is created by Start() so Shutdown() can drain it.
 	httpServer *http.Server
 	// uptimeStart anchors /api/health's uptime_s.
@@ -63,14 +81,16 @@ type Server struct {
 // is the shared secret required by every /api/* endpoint and the /ws upgrade.
 func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []string, token string) *Server {
 	s := &Server{
-		port:         port,
-		store:        store,
-		embeddedFS:   embeddedFS,
-		mux:          http.NewServeMux(),
-		hostIPs:      hostIPs,
-		token:        token,
-		pingInterval: defaultPingInterval,
-		uptimeStart:  time.Now(),
+		port:          port,
+		store:         store,
+		embeddedFS:    embeddedFS,
+		mux:           http.NewServeMux(),
+		hostIPs:       hostIPs,
+		token:         token,
+		pingInterval:  defaultPingInterval,
+		statsInterval: defaultStatsInterval,
+		statsStop:     make(chan struct{}),
+		uptimeStart:   time.Now(),
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -416,18 +436,47 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// startStatsHeartbeat starts the periodic `stats` broadcast loop (M4b): a
+// single server-wide ticker that fans a lightweight summary frame out to ALL
+// subscribers via store.BroadcastStats. It never notifies and never touches
+// sessions — pure liveness plus summary. Idempotent: Start() invokes it, and
+// tests may invoke it directly against an httptest server. Shutdown stops it.
+func (s *Server) startStatsHeartbeat() {
+	s.statsStartOnce.Do(func() {
+		interval := s.statsInterval
+		if interval <= 0 {
+			interval = defaultStatsInterval
+		}
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-s.statsStop:
+					return
+				case <-ticker.C:
+					s.store.BroadcastStats()
+				}
+			}
+		}()
+	})
+}
+
 // Start runs the HTTP server on 0.0.0.0:<port>. It returns http.ErrServerClosed
 // after Shutdown() drains the server; any other error means the listener
 // failed (e.g. the port is already bound).
 func (s *Server) Start() error {
+	s.startStatsHeartbeat()
 	addr := fmt.Sprintf("0.0.0.0:%d", s.port)
 	s.httpServer = &http.Server{Addr: addr, Handler: s.mux}
 	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully drains in-flight requests (bounded by ctx) and closes
-// the listeners. It is a no-op when the server was never started.
+// the listeners. It is a no-op when the server was never started (the stats
+// heartbeat, if running, is stopped either way).
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.statsStopOnce.Do(func() { close(s.statsStop) })
 	if s.httpServer == nil {
 		return nil
 	}

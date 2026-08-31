@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext must stay permitted for plain http/ws LAN traffic to the desktop server; drop it only when wss-everywhere lands (relay milestone M5.1). -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
@@ -6,11 +7,4 @@
             <certificates src="user" />
         </trust-anchors>
     </base-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.0.0/8</domain>
-        <domain includeSubdomains="true">172.16.0.0/12</domain>
-        <domain includeSubdomains="true">192.168.0.0/16</domain>
-    </domain-config>
 </network-security-config>

@@ -15,7 +15,13 @@ import { Session, AppNotification, ServerStateSnapshot, WebSocketMessage } from 
 export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [hasNotificationPerm, setHasNotificationPerm] = useState<boolean>(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  // M4b: with no saved URL there is nothing to connect to — open the
+  // ConnectionModal automatically on first launch instead of hammering a
+  // hardcoded fallback address.
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(() => wsService.getServerUrl() === '');
+  // Tracked in state so the offline banner reflects saves AND failover
+  // promotions without re-reading the service on every render.
+  const [serverUrl, setServerUrl] = useState<string>(wsService.getServerUrl());
   const [activeSession, setActiveSession] = useState<Session | undefined>();
   const [hostIps, setHostIps] = useState<string[]>([]);
   const [serverPort, setServerPort] = useState<number>(9280);
@@ -30,6 +36,8 @@ export const App: React.FC = () => {
     const unsubConn = wsService.onConnectionChange((connected) => {
       setIsConnected(connected);
       if (connected) {
+        // A failover candidate may have been promoted to the saved URL.
+        setServerUrl(wsService.getServerUrl());
         // Fetch initial snapshot on connect
         wsService.fetchStatus().then((snap) => {
           if (snap) handleSnapshot(snap);
@@ -56,6 +64,9 @@ export const App: React.FC = () => {
     setServerPort(snap.port || 9280);
     setActiveSession(snap.active_session);
     setNotifications(snap.notifications || []);
+    // M4b: let the socket service fail over to these hosts if the saved URL
+    // stops answering (the PC's LAN IP can change via DHCP).
+    wsService.setFailoverCandidates(snap.host_ips || []);
     if (snap.active_session?.recent_logs) {
       setLogs(snap.active_session.recent_logs);
     }
@@ -79,11 +90,14 @@ export const App: React.FC = () => {
       case 'notification': {
         const notif = msg.data as AppNotification;
         setNotifications((prev) => [notif, ...prev.slice(0, 49)]);
-        // M4a: heads-up notifications for server frames are now fired by the
-        // native MonitoringService foreground service (its own WebSocket
-        // connection), so they keep working when the app is closed. Calling
-        // notificationService.notify() here as well would make every alert
-        // fire twice while the app is foregrounded — do not re-add it.
+        // M4a: heads-up alerts inside the APK are owned by the native
+        // MonitoringService (its own WebSocket), so they keep working when
+        // the app is closed — this JS path must stay silent there or every
+        // alert fires twice. Anywhere else (browser/PWA) there is no native
+        // service, so the web fallback still has to fire here (M4b).
+        if (!window.AndroidBridge) {
+          notificationService.notify(notif.title, notif.body, notif.type);
+        }
         break;
       }
     }
@@ -126,6 +140,9 @@ export const App: React.FC = () => {
 
   const handleSaveUrl = (url: string) => {
     wsService.setServerUrl(url);
+    // setServerUrl normalizes (scheme defaulting, inline-token extraction) —
+    // read back what was actually saved so the banner shows the truth.
+    setServerUrl(wsService.getServerUrl());
   };
 
   return (
@@ -147,8 +164,12 @@ export const App: React.FC = () => {
             onClick={() => setIsSettingsOpen(true)}
             className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center justify-between cursor-pointer animate-pulse"
           >
-            <span>Connecting to PC ({wsService.getServerUrl()})...</span>
-            <span className="underline">Change IP</span>
+            {serverUrl ? (
+              <span>Connecting to PC ({serverUrl})...</span>
+            ) : (
+              <span>Set up your server — no desktop address saved yet</span>
+            )}
+            <span className="underline">{serverUrl ? 'Change IP' : 'Set up'}</span>
           </div>
         )}
 
