@@ -18,6 +18,7 @@ import (
 	"claude-remote-server/internal/auth"
 	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/network"
+	"claude-remote-server/internal/relayclient"
 	"claude-remote-server/internal/state"
 	"claude-remote-server/internal/watcher"
 	"claude-remote-server/web"
@@ -50,6 +51,7 @@ func main() {
 	noWatchFlag := flag.Bool("no-watch", false, "Disable JSONL transcript file watcher")
 	idleTimeoutFlag := flag.String("idle-timeout", "300s", "How long a session may receive no hook events before it is marked stalled (e.g. 300s, 2m30s)")
 	logFileFlag := flag.String("log-file", "", "Also write log output to this file (rotates to <path>.1 past 5MB; default: stdout only)")
+	relayFlag := flag.String("relay", os.Getenv("RELAY_URL"), "Remote relay URL to dial out to so off-LAN phones can connect, e.g. wss://relay.example.com (env RELAY_URL; empty = disabled)")
 	flag.Parse()
 
 	// Lifecycle-management flags never run the server.
@@ -181,6 +183,17 @@ func main() {
 	// 6. Initialize & Start API Server (after replay & spool drain)
 	srv := api.NewServer(port, store, web.EmbeddedFS, hostIPs, token)
 
+	// 6a. Optional remote relay (M5.1): dial OUT to the relay hub so phones
+	// off the LAN can join the same token-keyed room. Additive — the LAN
+	// URLs above stay the primary path, and the relay client runs entirely
+	// in the background with its own reconnect loop.
+	var relay *relayclient.Client
+	if *relayFlag != "" {
+		relay = relayclient.NewClient(*relayFlag, token, store)
+		relay.Start(context.Background())
+		diagf("🌐 Relay client active → %s", *relayFlag)
+	}
+
 	// 7. Graceful shutdown: Ctrl+C / SIGTERM (signal.Notify) and the Windows
 	// console-close events (installConsoleHandler) all funnel into ONE
 	// bounded path — persist watcher offsets, drain in-flight HTTP (~3s),
@@ -196,6 +209,9 @@ func main() {
 			// double-call a no-op.
 			if fw != nil {
 				fw.Stop()
+			}
+			if relay != nil {
+				relay.Stop()
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
