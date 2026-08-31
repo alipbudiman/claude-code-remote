@@ -24,10 +24,27 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 
   if (!isOpen) return null;
 
+  // M4a: mirror the connection settings into the native MonitoringService
+  // (foreground service) so its own WebSocket uses the same server/token.
+  // Call AFTER wsService.setServerUrl()/setToken() so the normalized URL and
+  // the effective token (setToken keeps the stored one when the field is
+  // blank) are what gets persisted natively.
+  const syncNativeConfig = () => {
+    const bridge = window.AndroidBridge;
+    if (bridge && typeof bridge.saveServerConfig === 'function') {
+      try {
+        bridge.saveServerConfig(wsService.getServerUrl(), wsService.getToken());
+      } catch (e) {
+        console.error('AndroidBridge saveServerConfig failed', e);
+      }
+    }
+  };
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSaveUrl(inputUrl);
     wsService.setToken(inputToken);
+    syncNativeConfig();
     onClose();
   };
 
@@ -35,6 +52,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
     const url = `http://${ip}:${port || 9280}`;
     setInputUrl(url);
     onSaveUrl(url);
+    syncNativeConfig();
     onClose();
   };
 

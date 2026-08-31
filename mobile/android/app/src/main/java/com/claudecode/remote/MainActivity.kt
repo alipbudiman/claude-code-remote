@@ -25,6 +25,13 @@ class MainActivity : AppCompatActivity() {
         notificationHelper = NotificationHelper(this)
         batteryHelper = BatteryOptimizationHelper(this)
 
+        // Start the native monitoring foreground service: it owns the
+        // WebSocket connection and notifications so tracking survives the
+        // app being closed (M4a root-cause fix). No-op if already running;
+        // it idles on a "waiting for configuration" notification until the
+        // WebView bridge saves the server config (saveServerConfig below).
+        MonitoringService.start(this)
+
         // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -199,6 +206,21 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun isNativeAndroid(): Boolean = true
+
+        /**
+         * Persists the connection settings for the native MonitoringService
+         * (its config source), then pokes it so it reconnects immediately.
+         * Called by the WebView whenever the user saves connection settings.
+         */
+        @JavascriptInterface
+        fun saveServerConfig(url: String, token: String) {
+            getSharedPreferences(MonitoringService.PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(MonitoringService.PREF_SERVER_URL, url.trim())
+                .putString(MonitoringService.PREF_TOKEN, token.trim())
+                .apply()
+            MonitoringService.start(this@MainActivity)
+        }
 
         @JavascriptInterface
         fun isBatteryUnrestricted(): Boolean = batteryHelper.isIgnoringBatteryOptimizations()

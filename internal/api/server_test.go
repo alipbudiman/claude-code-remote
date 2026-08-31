@@ -441,3 +441,128 @@ func TestShutdownWithoutStartIsNoop(t *testing.T) {
 		t.Fatalf("Shutdown before Start = %v, want nil", err)
 	}
 }
+
+// --- M4a: /ws keepalive (server pings + read-deadline reaping) ---
+
+// newKeepaliveTestServer builds a real server whose ping interval is shrunk
+// for a fast test run (production default is 20s — far too slow for CI).
+func newKeepaliveTestServer(t *testing.T, pingInterval time.Duration) *httptest.Server {
+	t.Helper()
+	srv := NewServer(0, state.NewStore(0, nil), web.EmbeddedFS, nil, testToken)
+	srv.pingInterval = pingInterval
+	ts := httptest.NewServer(srv.mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// dialKeepaliveClient dials /ws with a valid subprotocol token and keeps a
+// reader goroutine alive so incoming control frames are actually processed
+// (gorilla only dispatches ping handlers from a read loop). The installed
+// ping handler records pings and deliberately never answers them, which is
+// exactly the "client that stopped responding" case the keepalive exists for.
+func dialKeepaliveClient(t *testing.T, ts *httptest.Server, onPing func()) *websocket.Conn {
+	t.Helper()
+	dialer := &websocket.Dialer{Subprotocols: []string{"claude-remote." + testToken}}
+	conn, _, err := dialer.Dial(wsURL(ts), nil)
+	if err != nil {
+		t.Fatalf("dial /ws with subprotocol token: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	conn.SetPingHandler(func(string) error {
+		if onPing != nil {
+			onPing()
+		}
+		return nil // swallow the ping: never send a pong
+	})
+	go func() {
+		for {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	return conn
+}
+
+// M4a: the server must send WebSocket ping control frames on every /ws
+// connection, so half-open connections become detectable.
+func TestWSServerPingsClient(t *testing.T) {
+	ts := newKeepaliveTestServer(t, 50*time.Millisecond)
+
+	pings := make(chan struct{}, 8)
+	dialKeepaliveClient(t, ts, func() {
+		select {
+		case pings <- struct{}{}:
+		default:
+		}
+	})
+
+	select {
+	case <-pings:
+		// First ping arrived — keepalive is live.
+	case <-time.After(3 * time.Second):
+		t.Fatal("no ping control frame received within 3s of connecting")
+	}
+}
+
+// M4a: a client that stops responding (no pongs, no data — e.g. a phone that
+// vanished off the Wi-Fi) must be reaped by the server's read deadline
+// instead of pinning the connection at "connected" forever.
+func TestWSUnresponsiveClientReapedByReadDeadline(t *testing.T) {
+	// 40ms ping interval => 120ms read window (3x the interval).
+	ts := newKeepaliveTestServer(t, 40*time.Millisecond)
+
+	closed := make(chan error, 1)
+	conn := dialKeepaliveClient(t, ts, nil)
+	go func() {
+		for {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				closed <- err
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-closed:
+		// Server tore the connection down after the read deadline expired
+		// without a single pong. Success.
+	case <-time.After(3 * time.Second):
+		t.Fatal("unresponsive connection was not torn down within 3s; read deadline is not enforced")
+	}
+}
+
+// M4a: a client that DOES answer pings must stay connected across many read
+// windows (the pong handler extends the deadline).
+func TestWSResponsiveClientSurvivesReadDeadline(t *testing.T) {
+	// 30ms ping interval => 90ms read window; survive for >10 windows.
+	ts := newKeepaliveTestServer(t, 30*time.Millisecond)
+
+	dialer := &websocket.Dialer{Subprotocols: []string{"claude-remote." + testToken}}
+	conn, _, err := dialer.Dial(wsURL(ts), nil)
+	if err != nil {
+		t.Fatalf("dial /ws: %v", err)
+	}
+	defer conn.Close()
+
+	// Default gorilla ping handler answers pongs automatically while reading.
+	go func() {
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Still alive after 1s means at least 11 read windows came and went with
+	// the deadline extended by pongs each time.
+	time.Sleep(1 * time.Second)
+	if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("connection died while responding to pings: %v", err)
+	}
+}

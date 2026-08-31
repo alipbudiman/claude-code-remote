@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="true"
@@ -18,7 +21,7 @@
         android:theme="@style/AppTheme"
         android:networkSecurityConfig="@xml/network_security_config"
         android:usesCleartextTraffic="true">
-        
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -29,6 +32,29 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Native monitoring foreground service: owns the WebSocket connection
+             to the desktop server and the progress notification, so tracking
+             survives the app being closed (root-cause fix for the frozen
+             "Working" notification). dataSync type: best-effort resume; on
+             Android 15 this type is capped at ~6h cumulative per day. -->
+        <service
+            android:name=".MonitoringService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Best-effort tracking resume after reboot. exported="false" is fine:
+             BOOT_COMPLETED is a protected system broadcast, so the system still
+             delivers it to non-exported receivers. Android 15 may forbid
+             starting a dataSync FGS from the boot path (the receiver catches
+             and logs that). -->
+        <receiver
+            android:name=".BootCompletedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

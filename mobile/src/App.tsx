@@ -79,8 +79,11 @@ export const App: React.FC = () => {
       case 'notification': {
         const notif = msg.data as AppNotification;
         setNotifications((prev) => [notif, ...prev.slice(0, 49)]);
-        // Trigger mobile push & chime
-        notificationService.notify(notif.title, notif.body, notif.type);
+        // M4a: heads-up notifications for server frames are now fired by the
+        // native MonitoringService foreground service (its own WebSocket
+        // connection), so they keep working when the app is closed. Calling
+        // notificationService.notify() here as well would make every alert
+        // fire twice while the app is foregrounded — do not re-add it.
         break;
       }
     }

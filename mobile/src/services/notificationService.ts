@@ -10,6 +10,9 @@ declare global {
         isWaitingInput: boolean,
         subagentCount: number
       ) => void;
+      // Persists server URL + token for the native MonitoringService
+      // (foreground service) so it owns its own connection config.
+      saveServerConfig: (url: string, token: string) => void;
       openChromeRemoteDesktop: () => void;
       isNativeAndroid: () => boolean;
       isBatteryUnrestricted: () => boolean;
@@ -20,6 +23,13 @@ declare global {
 }
 
 // Notification Service for Android APK & Mobile Web
+//
+// M4a note: heads-up alerts for live server `notification` frames are now
+// owned by the native MonitoringService foreground service (it holds its own
+// WebSocket), so App.tsx no longer routes server frames through notify().
+// The chime/haptic paths below are currently exercised only by the local
+// "Notifications Enabled" test alert and the web (non-APK) fallback. Full
+// removal/retirement of the JS chime path is M4b scope — do not delete yet.
 class NotificationService {
   private hasPermission: boolean = false;
   private audioContext: AudioContext | null = null;

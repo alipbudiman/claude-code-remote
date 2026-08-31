@@ -1,5 +1,6 @@
 package com.claudecode.remote
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -122,6 +123,52 @@ class NotificationHelper(private val context: Context) {
                 )
 
             notificationManager.notify(NOTIFICATION_PROGRESS_ID, builder.build())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Builds a plain status notification for the MonitoringService foreground
+     * service (waiting / reconnecting / stopped states). Uses the same
+     * low-importance channel and NOTIFICATION_PROGRESS_ID as the progress
+     * notification, so posting it updates the foreground service's
+     * notification in place.
+     */
+    fun buildStatusNotification(title: String, text: String, ongoing: Boolean): Notification {
+        val appIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val appPendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            appIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_PROGRESS_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(appPendingIntent)
+            .setOngoing(ongoing)
+            .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+    }
+
+    /**
+     * Posts (or updates) the monitoring service status notification identified
+     * by NOTIFICATION_PROGRESS_ID.
+     */
+    fun postStatusNotification(title: String, text: String, ongoing: Boolean) {
+        try {
+            notificationManager.notify(
+                NOTIFICATION_PROGRESS_ID,
+                buildStatusNotification(title, text, ongoing)
+            )
         } catch (e: Exception) {
             e.printStackTrace()
         }

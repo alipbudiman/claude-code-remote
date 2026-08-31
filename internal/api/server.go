@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,6 +30,15 @@ const ServerVersion = "1.0.0"
 // request (it serves the bundled dashboard from this virtual https origin).
 const androidWebViewOrigin = "https://appassets.androidplatform.net"
 
+// defaultPingInterval is the /ws keepalive cadence: every connection is
+// pinged this often, and a client that goes three intervals without a pong
+// (or any traffic) is torn down instead of pinning at "connected".
+const defaultPingInterval = 20 * time.Second
+
+// wsWriteTimeout bounds every server-to-client write so a slow or wedged
+// client cannot block a broadcast or ping goroutine indefinitely.
+const wsWriteTimeout = 10 * time.Second
+
 // Server encapsulates the HTTP and WebSocket API router
 type Server struct {
 	port       int
@@ -38,6 +48,10 @@ type Server struct {
 	hostIPs    []string
 	token      string
 	upgrader   websocket.Upgrader
+
+	// pingInterval is how often /ws connections are pinged (see
+	// defaultPingInterval). Tests shrink it to keep the suite fast.
+	pingInterval time.Duration
 
 	// httpServer is created by Start() so Shutdown() can drain it.
 	httpServer *http.Server
@@ -49,13 +63,14 @@ type Server struct {
 // is the shared secret required by every /api/* endpoint and the /ws upgrade.
 func NewServer(port int, store *state.Store, embeddedFS embed.FS, hostIPs []string, token string) *Server {
 	s := &Server{
-		port:        port,
-		store:       store,
-		embeddedFS:  embeddedFS,
-		mux:         http.NewServeMux(),
-		hostIPs:     hostIPs,
-		token:       token,
-		uptimeStart: time.Now(),
+		port:         port,
+		store:        store,
+		embeddedFS:   embeddedFS,
+		mux:          http.NewServeMux(),
+		hostIPs:      hostIPs,
+		token:        token,
+		pingInterval: defaultPingInterval,
+		uptimeStart:  time.Now(),
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -206,12 +221,39 @@ func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleWebSocket serves a long-lived connection: it sends the initial state
+// snapshot, streams live broadcasts, and keeps the link alive with a ping
+// ticker (M4a). A client that stops responding — half-open socket, vanished
+// phone, wedged WebView — is reaped by a read deadline instead of lingering
+// as a zombie subscriber.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+
+	interval := s.pingInterval
+	if interval <= 0 {
+		interval = defaultPingInterval
+	}
+
+	// gorilla/websocket permits one concurrent writer per connection: the
+	// initial snapshot, the broadcast pump, and the ping ticker all funnel
+	// through writeMu, each write bounded by wsWriteTimeout.
+	var writeMu sync.Mutex
+	sendJSON := func(v interface{}) bool {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+		if err := conn.WriteJSON(v); err != nil {
+			// Hard-close so the blocked reader and this pump terminate now
+			// rather than on the client's next disconnect.
+			_ = conn.Close()
+			return false
+		}
+		return true
+	}
 
 	// Send initial full state snapshot
 	snapshot := s.store.GetSnapshot()
@@ -220,7 +262,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Data:      snapshot,
 		Timestamp: time.Now(),
 	}
-	if err := conn.WriteJSON(initMsg); err != nil {
+	if !sendJSON(initMsg) {
 		return
 	}
 
@@ -228,20 +270,61 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	subCh := s.store.Subscribe()
 	defer s.store.Unsubscribe(subCh)
 
+	// done is closed when the read loop exits; it stops the ping ticker.
+	done := make(chan struct{})
+	defer close(done)
+
 	// Pump incoming messages from store to WebSocket client
 	go func() {
 		for msg := range subCh {
-			if err := conn.WriteJSON(msg); err != nil {
+			if !sendJSON(msg) {
 				return
 			}
 		}
 	}()
 
-	// Keep alive & read dummy messages
+	// Keepalive: ping the client every interval. WriteControl is documented
+	// as safe to call alongside other writers, but it shares writeMu anyway
+	// so there is exactly one writer on this connection at any instant.
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteTimeout))
+				writeMu.Unlock()
+				if err != nil {
+					_ = conn.Close() // release the read loop
+					return
+				}
+			}
+		}
+	}()
+
+	// Read loop with a liveness deadline. Every WebSocket stack answers pings
+	// with pongs automatically, so a healthy connection keeps the deadline
+	// extended forever; anything else expires it and breaks the loop, after
+	// which the deferred Close/Unsubscribe tear the connection down.
+	readWindow := 3 * interval
+	extendReadDeadline := func() error {
+		return conn.SetReadDeadline(time.Now().Add(readWindow))
+	}
+	if err := extendReadDeadline(); err != nil {
+		return
+	}
+	conn.SetPongHandler(func(string) error { return extendReadDeadline() })
+
+	// Read (and discard) client messages until the connection dies.
 	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			break
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if err := extendReadDeadline(); err != nil {
+			return
 		}
 	}
 }
