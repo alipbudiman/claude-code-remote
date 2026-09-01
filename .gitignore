@@ -17,6 +17,8 @@ Thumbs.db
 CLAUDE.md
 .instructions/
 hand-off.md
+.playwright-mcp/
+docs/
 
 # Agent scratch
 .superpowers/
