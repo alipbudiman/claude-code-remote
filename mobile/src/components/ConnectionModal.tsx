@@ -32,6 +32,13 @@ const isValidServerUrl = (raw: string): boolean => {
 // getUserMedia stream and the rAF decode loop are torn down in the effect
 // cleanup, so closing the overlay — or the modal returning null — can never
 // leave the camera running.
+//
+// M11: in the APK the camera needs the app-level CAMERA permission BEFORE
+// getUserMedia can work (the WebView page cannot prompt for it). On mount we
+// ask through the native bridge and wait for its __onCameraPermission
+// callback; denial offers an "Open Settings" escape hatch. In a plain
+// browser the bridge is absent and the browser prompts for itself — that
+// path is unchanged.
 const QrScannerOverlay: React.FC<{
   onScanned: (text: string) => void;
   onCancel: () => void;
@@ -41,6 +48,10 @@ const QrScannerOverlay: React.FC<{
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const [cameraError, setCameraError] = useState(false);
+  // M11 native permission-flow states: waiting for the system prompt, and
+  // outright denial (don't-ask-again included).
+  const [permWaiting, setPermWaiting] = useState(false);
+  const [permDenied, setPermDenied] = useState(false);
 
   // Callback in a ref so a parent re-render mid-scan (fresh inline arrow)
   // never restarts the camera.
@@ -86,32 +97,64 @@ const QrScannerOverlay: React.FC<{
       rafRef.current = requestAnimationFrame(tick);
     };
 
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: 'environment' } })
-      .then((stream) => {
-        if (cancelled) {
-          // Unmount raced the grant: nobody is listening anymore.
-          stream.getTracks().forEach((t) => t.stop());
-          return;
+    const startCamera = () => {
+      navigator.mediaDevices
+        .getUserMedia({ video: { facingMode: 'environment' } })
+        .then((stream) => {
+          if (cancelled) {
+            // Unmount raced the grant: nobody is listening anymore.
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          streamRef.current = stream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play().catch(() => {
+              // Muted autoplay failing would be exceptional; without frames
+              // the loop simply keeps waiting, and the user can Cancel.
+            });
+          }
+          rafRef.current = requestAnimationFrame(tick);
+        })
+        .catch(() => {
+          // Denied / no camera: graceful manual-entry fallback, no crash.
+          if (!cancelled) setCameraError(true);
+        });
+    };
+
+    // M11: gate on the native app-level permission first when the bridge
+    // exists and reports it missing. Mirrors the __onBatteryStatusUpdate
+    // pattern: register the global callback, trigger the native flow, and
+    // clean the handler up on unmount (in the effect return below).
+    const bridge = window.AndroidBridge;
+    if (
+      bridge &&
+      typeof bridge.hasCameraPermission === 'function' &&
+      !bridge.hasCameraPermission()
+    ) {
+      setPermWaiting(true);
+      window.__onCameraPermission = (granted: boolean) => {
+        if (cancelled) return;
+        setPermWaiting(false);
+        if (granted) {
+          startCamera();
+        } else {
+          setPermDenied(true);
         }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {
-            // Muted autoplay failing would be exceptional; without frames
-            // the loop simply keeps waiting, and the user can Cancel.
-          });
-        }
-        rafRef.current = requestAnimationFrame(tick);
-      })
-      .catch(() => {
-        // Denied / no camera: graceful manual-entry fallback, no crash.
-        if (!cancelled) setCameraError(true);
-      });
+      };
+      if (typeof bridge.requestCameraPermission === 'function') {
+        bridge.requestCameraPermission();
+      }
+    } else {
+      startCamera();
+    }
 
     return () => {
       cancelled = true;
       stopScan();
+      // Never leave the global permission callback registered once the
+      // overlay is closed (same cleanup discipline as BatteryBanner).
+      window.__onCameraPermission = undefined;
     };
   }, []);
 
@@ -129,11 +172,36 @@ const QrScannerOverlay: React.FC<{
           <div className="absolute inset-6 rounded-xl border border-white/30 pointer-events-none" />
         </div>
         <canvas ref={canvasRef} className="hidden" />
-        <p className={`mt-4 text-center text-xs ${cameraError ? 'text-red-400' : 'text-slate-300'}`}>
-          {cameraError
-            ? 'Kamera tidak tersedia/diizinkan — isi manual'
-            : 'Arahkan kamera ke QR di terminal server'}
+        <p
+          className={`mt-4 text-center text-xs ${
+            cameraError || permDenied
+              ? 'text-red-400'
+              : permWaiting
+                ? 'text-amber-400'
+                : 'text-slate-300'
+          }`}
+        >
+          {permDenied
+            ? 'Camera permission is required to scan. Enable it in Settings.'
+            : cameraError
+              ? 'Camera unavailable or not permitted — enter the address manually'
+              : permWaiting
+                ? 'Waiting for camera permission…'
+                : 'Point the camera at the QR code in the server terminal'}
         </p>
+        {permDenied && (
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof window.AndroidBridge?.openAppSettings === 'function') {
+                window.AndroidBridge.openAppSettings();
+              }
+            }}
+            className="mt-3 w-full py-3 rounded-xl bg-[#D97757] hover:bg-[#e88666] text-white font-bold text-sm transition-colors"
+          >
+            Open Settings
+          </button>
+        )}
         <button
           type="button"
           onClick={onCancel}
@@ -327,7 +395,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
           {/* M6: LAN path — the desktop server on the local Wi-Fi (http). */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
-              Server LAN (IP:Port)
+              LAN Server (IP:Port)
             </label>
             <input
               type="text"
@@ -383,7 +451,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
             </div>
             {tokenError && (
               <p className="text-[11px] text-red-400 mt-1">
-                Hasil scan bukan URL server — bukan juga token 64-karakter yang valid
+                The scan result is not a server URL or a valid 64-character token
               </p>
             )}
             <p className="text-[11px] text-slate-500 mt-1">

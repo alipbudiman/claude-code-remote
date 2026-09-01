@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -610,4 +612,261 @@ func TestWSClientReceivesStatsHeartbeat(t *testing.T) {
 		return // first stats frame received — heartbeat is live
 	}
 	t.Fatal("no stats frame received within 2s of connecting; heartbeat is not running")
+}
+
+// --- M11: runtime relay configuration (GET/POST /api/relay) ---
+
+// relayStateResponse mirrors the documented /api/relay JSON contract.
+type relayStateResponse struct {
+	URL       string `json:"url"`
+	Active    bool   `json:"active"`
+	Connected bool   `json:"connected"`
+}
+
+// withRelayFile isolates the persisted relay-URL file to a temp path for one
+// test (production default: ~/.claude/claude-remote-relay.url). Returns the
+// isolated path.
+func withRelayFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude-remote-relay.url")
+	old := relayURLFilePath
+	relayURLFilePath = path
+	t.Cleanup(func() { relayURLFilePath = old })
+	return path
+}
+
+// relayGet fetches /api/relay with the bearer token and decodes the state.
+func relayGet(t *testing.T, baseURL string) (relayStateResponse, int) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", baseURL+"/api/relay", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	var st relayStateResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+			t.Fatalf("decode /api/relay body: %v", err)
+		}
+	}
+	return st, resp.StatusCode
+}
+
+// relayPost applies a relay URL via POST /api/relay with the bearer token.
+func relayPost(t *testing.T, baseURL, body string) (relayStateResponse, int) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", baseURL+"/api/relay", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	var st relayStateResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+			t.Fatalf("decode POST /api/relay body: %v", err)
+		}
+	}
+	return st, resp.StatusCode
+}
+
+// M11: GET /api/relay without a token -> 401 (same auth gate as every API).
+func TestRelayGetWithoutTokenReturns401(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/relay")
+	if err != nil {
+		t.Fatalf("GET /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/relay without token = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// M11: POST /api/relay without a token -> 401.
+func TestRelayPostWithoutTokenReturns401(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/relay", strings.NewReader(`{"url":"wss://x.example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/relay without token = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// M11: with no relay configured (no flag/env/file), GET /api/relay reports
+// the documented disabled state.
+func TestRelayGetDisabledByDefault(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	st, code := relayGet(t, ts.URL)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/relay status = %d, want %d", code, http.StatusOK)
+	}
+	if st.URL != "" || st.Active || st.Connected {
+		t.Fatalf("default relay state = %+v, want {url:\"\" active:false connected:false}", st)
+	}
+}
+
+// M11: non-wss/https schemes (and hostless URLs) are rejected with 400 and
+// leave the relay state untouched.
+func TestRelayPostRejectsInvalidURLs(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	for _, bad := range []string{
+		"ws://127.0.0.1:9280",      // plaintext ws is not allowed off-LAN
+		"http://relay.example.com", // plaintext http is not allowed either
+		"ftp://relay.example.com",  // not a relay scheme at all
+		"wss://",                   // scheme without a host
+	} {
+		st, code := relayPost(t, ts.URL, `{"url":"`+bad+`"}`)
+		if code != http.StatusBadRequest {
+			t.Fatalf("POST /api/relay url=%q = %d, want %d", bad, code, http.StatusBadRequest)
+		}
+		if st != (relayStateResponse{}) {
+			t.Fatalf("400 response body for %q = %+v, want empty state", bad, st)
+		}
+	}
+
+	// State is unchanged after the rejections.
+	st, code := relayGet(t, ts.URL)
+	if code != http.StatusOK || st.Active {
+		t.Fatalf("state after rejected posts = %+v (code %d), want still disabled", st, code)
+	}
+}
+
+// M11: a malformed JSON body is a 400, not a 500.
+func TestRelayPostInvalidJSONReturns400(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/relay", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/relay invalid JSON = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// M11: methods other than GET/POST are answered with 405.
+func TestRelayMethodNotAllowed(t *testing.T) {
+	ts := newTestAPIServer(t)
+
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/relay", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /api/relay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT /api/relay = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+// M11: the enable → replace → disable drill against a server whose relay was
+// never running (apply must not panic). Uses a loopback URL the client cannot
+// reach, so `connected` stays false; the point is the state machine, the
+// persisted file, and clean client swapping.
+func TestRelayPostApplyReplaceDisableRoundTrip(t *testing.T) {
+	ts := newTestAPIServer(t)
+	file := withRelayFile(t)
+
+	// Enable: applied immediately and persisted.
+	st, code := relayPost(t, ts.URL, `{"url":"wss://127.0.0.1:1"}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST enable = %d, want %d", code, http.StatusOK)
+	}
+	if st.URL != "wss://127.0.0.1:1" || !st.Active || st.Connected {
+		t.Fatalf("state after enable = %+v, want url set + active + not connected", st)
+	}
+	if got := LoadPersistedRelayURL(); got != "wss://127.0.0.1:1" {
+		t.Fatalf("persisted relay URL = %q, want the applied URL", got)
+	}
+
+	// GET agrees with the just-applied state.
+	st, code = relayGet(t, ts.URL)
+	if code != http.StatusOK || st.URL != "wss://127.0.0.1:1" || !st.Active {
+		t.Fatalf("GET after enable = %+v (code %d), want the applied URL + active", st, code)
+	}
+
+	// Replace: a second URL swaps the client without error. (Also loopback:
+	// unit tests must not dial the real internet.)
+	st, code = relayPost(t, ts.URL, `{"url":"https://127.0.0.1:2"}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST replace = %d, want %d", code, http.StatusOK)
+	}
+	if st.URL != "https://127.0.0.1:2" || !st.Active {
+		t.Fatalf("state after replace = %+v, want the new URL + active", st)
+	}
+
+	// Disable: empty URL stops the client and clears the persisted setting.
+	st, code = relayPost(t, ts.URL, `{"url":""}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST disable = %d, want %d", code, http.StatusOK)
+	}
+	if st.URL != "" || st.Active || st.Connected {
+		t.Fatalf("state after disable = %+v, want fully disabled", st)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("relay URL file after disable: stat err = %v, want removed", err)
+	}
+}
+
+// M11: startup precedence — flag beats env beats persisted file.
+func TestResolveRelayURLPrecedence(t *testing.T) {
+	cases := []struct {
+		flagVal, envVal, fileVal, want string
+	}{
+		{"wss://flag.example.com", "wss://env.example.com", "wss://file.example.com", "wss://flag.example.com"},
+		{"", "wss://env.example.com", "wss://file.example.com", "wss://env.example.com"},
+		{"", "", "wss://file.example.com", "wss://file.example.com"},
+		{"", "", "", ""},
+		{"   ", "\twss://env.example.com\n", "  ", "wss://env.example.com"}, // whitespace-only loses
+	}
+	for _, tc := range cases {
+		if got := ResolveRelayURL(tc.flagVal, tc.envVal, tc.fileVal); got != tc.want {
+			t.Fatalf("ResolveRelayURL(%q, %q, %q) = %q, want %q", tc.flagVal, tc.envVal, tc.fileVal, got, tc.want)
+		}
+	}
+}
+
+// M11: persistence round trip — a saved URL loads back verbatim, and an empty
+// save removes the file entirely (absent = disabled).
+func TestPersistAndLoadRelayURLRoundTrip(t *testing.T) {
+	path := withRelayFile(t)
+
+	if err := persistRelayURL("wss://relay.example.com"); err != nil {
+		t.Fatalf("persistRelayURL: %v", err)
+	}
+	if got := LoadPersistedRelayURL(); got != "wss://relay.example.com" {
+		t.Fatalf("LoadPersistedRelayURL = %q, want the persisted URL", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("persisted relay URL file missing: %v", err)
+	}
+
+	if err := persistRelayURL(""); err != nil {
+		t.Fatalf("persistRelayURL(disable): %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("relay URL file after disable: stat err = %v, want removed", err)
+	}
+	if got := LoadPersistedRelayURL(); got != "" {
+		t.Fatalf("LoadPersistedRelayURL after disable = %q, want empty", got)
+	}
 }

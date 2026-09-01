@@ -693,6 +693,17 @@
           <input class="token-input" id="tokenInput" type="text" placeholder="64-character token" spellcheck="false" autocomplete="off">
           <button type="button" class="btn btn-primary" id="tokenSaveBtn">Save token</button>
         </div>
+        <!-- M11: runtime relay configuration (applied immediately, persisted
+             across restarts). Lives below the copy rows so the whole
+             connection story is one card. -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.5rem; padding-top:0.75rem; border-top:1px solid var(--card-border);">
+          <label for="relayUrlInput" style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-dim);">Relay URL</label>
+          <input class="token-input" id="relayUrlInput" type="text" placeholder="wss://your-relay.up.railway.app" spellcheck="false" autocomplete="off">
+          <button type="button" class="btn btn-primary" id="relaySaveBtn" style="padding:0.55rem 1rem; font-size:0.8rem;">Save</button>
+          <p id="relayError" style="display:none; font-size:0.75rem; color:#f87171; margin:0;"></p>
+          <p id="relayStatus" class="hint" style="margin:0;">Relay: …</p>
+          <p class="hint">Set a relay URL to reach this PC from any network. Empty disables it.</p>
+        </div>
         <p class="hint">Use these in the Android app — or scan the QR below from the same Wi-Fi.</p>
       </div>
 
@@ -815,6 +826,86 @@
       localStorage.setItem(TOKEN_KEY, v);
       window.location.reload();
     });
+
+    // ------------------------------------------------------------------
+    // Relay configuration (M11): GET/POST /api/relay — set or disable the
+    // relay at runtime. The server applies it immediately and persists it
+    // across restarts. State loads on start and after each save, and is
+    // re-polled every 10s so the status line stays honest.
+    // ------------------------------------------------------------------
+    const relayInput = document.getElementById('relayUrlInput');
+    const relaySaveBtn = document.getElementById('relaySaveBtn');
+    const relayError = document.getElementById('relayError');
+    const relayStatus = document.getElementById('relayStatus');
+    let relayInputPrefilled = false;
+
+    function renderRelayStatus(state) {
+      if (!state.url) {
+        relayStatus.textContent = 'Relay: disabled';
+        relayStatus.style.color = 'var(--text-dim)';
+        return;
+      }
+      if (state.connected) {
+        relayStatus.textContent = 'Relay: connected → ' + state.url;
+        relayStatus.style.color = 'var(--success)';
+      } else {
+        relayStatus.textContent = 'Relay: connecting…';
+        relayStatus.style.color = 'var(--warning)';
+      }
+    }
+
+    async function fetchRelayState() {
+      if (!token) return;
+      try {
+        const resp = await fetch('/api/relay?token=' + encodeURIComponent(token));
+        if (!resp.ok) return;
+        const state = await resp.json();
+        renderRelayStatus(state);
+        // Prefill the input once so the current URL is editable; never
+        // clobber what the user is typing afterwards.
+        if (!relayInputPrefilled && document.activeElement !== relayInput) {
+          relayInput.value = state.url || '';
+          relayInputPrefilled = true;
+        }
+      } catch (e) { /* transient network error — the next poll retries */ }
+    }
+
+    relaySaveBtn.addEventListener('click', async () => {
+      relayError.style.display = 'none';
+      const value = relayInput.value.trim();
+      // Cheap client-side pre-check; the server re-validates.
+      if (value && !/^wss:\/\//i.test(value) && !/^https:\/\//i.test(value)) {
+        relayError.textContent = 'Relay URL must start with wss:// or https:// — or be empty to disable the relay.';
+        relayError.style.display = 'block';
+        return;
+      }
+      relaySaveBtn.disabled = true;
+      relaySaveBtn.textContent = 'Saving…';
+      try {
+        const resp = await fetch('/api/relay?token=' + encodeURIComponent(token), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: value })
+        });
+        if (!resp.ok) {
+          relayError.textContent = resp.status === 400
+            ? 'Invalid relay URL — use wss:// or https://, or leave it empty to disable.'
+            : 'Saving failed (HTTP ' + resp.status + '). Check the server log.';
+          relayError.style.display = 'block';
+          return;
+        }
+        renderRelayStatus(await resp.json());
+      } catch (e) {
+        relayError.textContent = 'Saving failed — server unreachable.';
+        relayError.style.display = 'block';
+      } finally {
+        relaySaveBtn.disabled = false;
+        relaySaveBtn.textContent = 'Save';
+      }
+    });
+
+    fetchRelayState();
+    setInterval(fetchRelayState, 10000);
 
     // ------------------------------------------------------------------
     // Status rendering: working / waiting input / completed / idle

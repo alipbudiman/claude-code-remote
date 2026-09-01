@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -67,6 +68,11 @@ type Client struct {
 	stopCh   chan struct{}
 	cancel   context.CancelFunc
 
+	// connected is set while a relay connection is open (M11): stored true
+	// right after a dial succeeds, false again when the link drops or the
+	// client stops. Exposed via Connected() for /api/relay's status line.
+	connected atomic.Bool
+
 	// ignoredMu guards ignored (log-once bookkeeping for inbound frames).
 	ignoredMu sync.Mutex
 	ignored   map[string]bool
@@ -107,7 +113,17 @@ func (c *Client) Stop() {
 		if c.cancel != nil {
 			c.cancel()
 		}
+		c.connected.Store(false)
 	})
+}
+
+// Connected reports whether the client currently has an open relay
+// connection: set the moment a dial succeeds, cleared when the link drops,
+// the client stops, or before the first dial. Callers that need to swap
+// clients at runtime (POST /api/relay, M11) use it to distinguish
+// "connecting" from "connected".
+func (c *Client) Connected() bool {
+	return c.connected.Load()
 }
 
 // run owns the reconnect loop and the store subscription for the client's
@@ -137,8 +153,10 @@ func (c *Client) run(ctx context.Context) {
 			continue
 		}
 		backoff = minBackoff // reset on open
+		c.connected.Store(true)
 
 		c.serve(ctx, conn, sub)
+		c.connected.Store(false)
 		_ = conn.Close()
 
 		// Small pause before redialing so a relay that accepts and

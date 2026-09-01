@@ -17,8 +17,15 @@ declare global {
       isNativeAndroid: () => boolean;
       isBatteryUnrestricted: () => boolean;
       openBatterySettings: () => void;
+      // M11: on-demand camera permission flow for the QR scanner.
+      hasCameraPermission: () => boolean;
+      requestCameraPermission: () => void;
+      openAppSettings: () => void;
     };
     __onBatteryStatusUpdate?: (isUnrestricted: boolean) => void;
+    // M11: result callback for the native camera permission request
+    // (pushed by MainActivity.onRequestPermissionsResult, code 102).
+    __onCameraPermission?: (granted: boolean) => void;
   }
 }
 

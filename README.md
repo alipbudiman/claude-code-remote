@@ -53,14 +53,14 @@ Download the server binary for your OS from [Releases](https://github.com/alipbu
 claude-remote-server.exe
 ```
 
-On first start the server installs the Claude Code hooks into `~/.claude/settings.json`, prints its LAN URL, and shows a QR code in the terminal. Opening the URL in a desktop browser gives you the same dashboard as the phone.
+On first start the server installs the Claude Code hooks into `~/.claude/settings.json`, prints its LAN URL, and shows a QR code in the terminal. Opening the URL in a desktop browser gives you the same dashboard as the phone. To enable remote access later, open the dashboard in a browser and set the relay URL — no flags needed.
 
 Optional flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-port` | `9280` | Port to listen on (binds to `0.0.0.0`) |
-| `--relay <url>` | `RELAY_URL` env (disabled) | Dial out to a relay so phones off your LAN can connect, e.g. `wss://relay.example.com` |
+| `--relay <url>` | `RELAY_URL` env (disabled) | Dial out to a relay so phones off your LAN can connect, e.g. `wss://relay.example.com` — or set it at runtime from the web dashboard (Connection → Relay URL); the setting persists across restarts |
 | `-idle-timeout <dur>` | `300s` | How long a session may stay silent before it is marked stalled, e.g. `2m30s` |
 | `-log-file <path>` | stdout only | Also write logs to this file; rotates to `<path>.1` past 5 MB |
 | `-install` / `-uninstall` | — | Register or remove the logon Scheduled Task (auto-start at sign-in). Run `-install` once from an elevated console; any active `--relay`/`RELAY_URL` is baked into the task so the relay survives reboots |

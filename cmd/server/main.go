@@ -18,7 +18,6 @@ import (
 	"claude-remote-server/internal/auth"
 	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/network"
-	"claude-remote-server/internal/relayclient"
 	"claude-remote-server/internal/state"
 	"claude-remote-server/internal/watcher"
 	"claude-remote-server/web"
@@ -174,6 +173,14 @@ func main() {
 	fmt.Printf("   • http://localhost:%d (Local Desktop Browser)\n", port)
 	fmt.Println("------------------------------------------------------------------------")
 
+	// 5a. Resolve the relay setting (M11): --relay flag > RELAY_URL env > the
+	// URL persisted from the web dashboard. A flag/env value wins for THIS
+	// run only; the file is rewritten exclusively by POST /api/relay.
+	relayURL := api.ResolveRelayURL(*relayFlag, os.Getenv("RELAY_URL"), api.LoadPersistedRelayURL())
+	if relayURL == "" {
+		fmt.Println("💡 Tip: enable remote access (relay) from the web dashboard — open the URL above, Connection → Relay URL.")
+	}
+
 	// Print Terminal ASCII QR Code
 	fmt.Println("\n📱 Scan this QR Code from Android APK / Phone Camera to Connect:")
 	qrString := network.GenerateTerminalQRCode(primaryURL)
@@ -188,12 +195,13 @@ func main() {
 	// 6a. Optional remote relay (M5.1): dial OUT to the relay hub so phones
 	// off the LAN can join the same token-keyed room. Additive — the LAN
 	// URLs above stay the primary path, and the relay client runs entirely
-	// in the background with its own reconnect loop.
-	var relay *relayclient.Client
-	if *relayFlag != "" {
-		relay = relayclient.NewClient(*relayFlag, token, store)
-		relay.Start(context.Background())
-		diagf("🌐 Relay client active → %s", *relayFlag)
+	// in the background with its own reconnect loop. Since M11 the URL can
+	// also be set or changed at runtime from the web dashboard: the api
+	// server owns the current client (StartRelay/StopRelay) so POST
+	// /api/relay can swap it live; this boot-time call just seeds it.
+	if relayURL != "" {
+		srv.StartRelay(relayURL)
+		diagf("🌐 Relay client active → %s", relayURL)
 	}
 
 	// 7. Graceful shutdown: Ctrl+C / SIGTERM (signal.Notify) and the Windows
@@ -212,9 +220,9 @@ func main() {
 			if fw != nil {
 				fw.Stop()
 			}
-			if relay != nil {
-				relay.Stop()
-			}
+			// Stops whichever relay client is current — the boot-time one
+			// or the last one applied from the web dashboard (M11).
+			srv.StopRelay()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if err := srv.Shutdown(ctx); err != nil {

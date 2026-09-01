@@ -268,3 +268,43 @@ func TestClientReconnectsWhenRelayGoesSilent(t *testing.T) {
 	}
 	t.Fatalf("relay served %d connections within 5s, want >= 2 — a silent relay must trigger reconnect", f.connCount())
 }
+
+// (M11) Connected() reports the live link state for /api/relay: false before
+// any dial, true once a dial succeeds, false again after the link drops.
+func TestConnectedReflectsRelayLink(t *testing.T) {
+	store := state.NewStore(0, nil)
+	f := newFakeRelay(t, 0)
+
+	c := NewClient("ws"+strings.TrimPrefix(f.srv.URL, "http"), testToken, store)
+	if c.Connected() {
+		t.Fatal("Connected() before Start = true, want false")
+	}
+	c.Start(context.Background())
+	defer c.Stop()
+
+	// The relay serving our dial means the link is open.
+	serverConn := f.liveConn(t)
+	waitForConnected(t, c, true, "after a successful dial")
+
+	// Dropping the RELAY SIDE of the link breaks the connection (killing the
+	// whole httptest server would not: hijacked websocket conns are not
+	// force-closed by Close). The client will redial after its backoff —
+	// that is its job — but Connected() must report false while the link is
+	// down, and the reconnect backoff (>=1s) leaves a wide window to see it.
+	_ = serverConn.Close()
+	waitForConnected(t, c, false, "after the relay link dropped")
+}
+
+// waitForConnected polls c.Connected() until it equals want, failing the test
+// after 3s. The connect/disconnect transitions land on another goroutine, so
+// the flag is observed with a small bounded poll instead of a fixed sleep.
+func waitForConnected(t *testing.T, c *Client, want bool, when string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for c.Connected() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("Connected() never became %v %s", want, when)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

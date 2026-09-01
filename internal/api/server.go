@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"claude-remote-server/internal/hooks"
 	"claude-remote-server/internal/models"
 	"claude-remote-server/internal/network"
+	"claude-remote-server/internal/relayclient"
 	"claude-remote-server/internal/state"
 )
 
@@ -75,6 +78,14 @@ type Server struct {
 	httpServer *http.Server
 	// uptimeStart anchors /api/health's uptime_s.
 	uptimeStart time.Time
+
+	// relayMu guards relayClient/relayURL — the runtime-swappable relay
+	// connection (M11). The dashboard's POST /api/relay stops the current
+	// client and starts a fresh one under this mutex; graceful shutdown
+	// stops whichever client is current via StopRelay().
+	relayMu     sync.Mutex
+	relayClient *relayclient.Client
+	relayURL    string // effective URL; "" = relay disabled
 }
 
 // NewServer initializes an API server with all routes configured. The token
@@ -128,6 +139,7 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("/api/qr", apiGate(s.handleQRCode))
 	s.mux.Handle("/api/install-hooks", apiGate(s.handleInstallHooks))
 	s.mux.Handle("/api/health", apiGate(s.handleHealth))
+	s.mux.Handle("/api/relay", apiGate(s.handleRelay))
 
 	// 4. Embedded Web UI Dashboard (static HTML only, no data — ungated)
 	s.mux.HandleFunc("/", s.handleStaticWeb)
@@ -434,6 +446,202 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// --- M11: runtime relay configuration (GET/POST /api/relay) ---
+
+// relayURLFileName is the file under ~/.claude/ persisting the relay URL set
+// from the web dashboard. Empty/absent = relay disabled.
+const relayURLFileName = "claude-remote-relay.url"
+
+// relayURLFilePath overrides the default relay-URL file location. Empty in
+// production; set by tests for isolation (same pattern as auth.tokenFilePath).
+var relayURLFilePath string
+
+// relayStatus is the /api/relay response contract.
+type relayStatus struct {
+	URL       string `json:"url"`       // effective relay URL; "" = disabled
+	Active    bool   `json:"active"`    // a relay URL is configured
+	Connected bool   `json:"connected"` // the client currently has an open link
+}
+
+// ResolveRelayURL applies the M11 startup precedence: --relay flag >
+// RELAY_URL env > URL persisted from the web dashboard. A flag/env value
+// wins for THAT run only; the persisted file is rewritten exclusively by
+// POST /api/relay. Whitespace-only values count as empty.
+func ResolveRelayURL(flagVal, envVal, fileVal string) string {
+	for _, v := range []string{flagVal, envVal, fileVal} {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// validRelayURL accepts the two dial-out-safe relay forms: wss:// and https://
+// (relayclient maps https to wss) with a non-empty host. Plain ws:// and
+// http:// are rejected — the relay URL leaves the LAN, so transport
+// encryption is mandatory — as is anything that is not a URL at all.
+func validRelayURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "wss" || u.Scheme == "https") && u.Host != ""
+}
+
+// relayURLPath resolves the persisted relay-URL file location, mirroring
+// internal/auth's home-dir resolution (~/.claude/claude-remote-relay.url).
+func relayURLPath() (string, error) {
+	if relayURLFilePath != "" {
+		return relayURLFilePath, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("api: could not resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".claude", relayURLFileName), nil
+}
+
+// LoadPersistedRelayURL returns the relay URL saved from the web dashboard
+// ("" when absent, unreadable, or blank — all mean "disabled"). main.go folds
+// it into ResolveRelayURL at startup.
+func LoadPersistedRelayURL() string {
+	path, err := relayURLPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "" // absent file is the normal "never configured" case
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// persistRelayURL stores the dashboard-set relay URL. An empty URL disables
+// the relay and REMOVES the file (absent = disabled), so a stale URL can
+// never resurrect itself on the next start.
+func persistRelayURL(relayURL string) error {
+	path, err := relayURLPath()
+	if err != nil {
+		return err
+	}
+	if relayURL == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("api: could not remove relay URL file %s: %w", path, err)
+		}
+		return nil
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("api: could not create relay URL directory: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(relayURL), 0600); err != nil {
+		return fmt.Errorf("api: could not write relay URL file %s: %w", path, err)
+	}
+	return nil
+}
+
+// handleRelay serves GET (current relay state) and POST (validate, apply
+// immediately, and persist a new relay URL). Both are token-gated like every
+// other /api/* endpoint.
+func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.RelayState())
+	case http.MethodPost:
+		s.handleRelayPost(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleRelayPost applies a relay URL at runtime: stop the current client,
+// start a fresh one for a non-empty URL, persist the setting, respond with
+// the new state.
+func (s *Server) handleRelayPost(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+
+	relayURL := strings.TrimSpace(body.URL)
+	if relayURL != "" && !validRelayURL(relayURL) {
+		http.Error(w, `{"error":"relay URL must use wss:// or https:// (empty disables the relay)"}`, http.StatusBadRequest)
+		return
+	}
+
+	s.StartRelay(relayURL)
+	if err := persistRelayURL(relayURL); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"could not persist relay setting: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.RelayState())
+}
+
+// RelayState returns the current relay configuration and link state (the GET
+// /api/relay contract; also the POST response).
+func (s *Server) RelayState() relayStatus {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	return s.relayStateLocked()
+}
+
+// StartRelay makes relayURL the effective relay setting: it stops the current
+// client (if any) and, for a non-empty URL, creates and starts a new one.
+// main.go calls this once at boot with the ResolveRelayURL() winner; POST
+// /api/relay calls it on every apply. The persisted file is NOT touched here
+// — only the endpoint persists.
+func (s *Server) StartRelay(relayURL string) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.stopRelayLocked()
+	s.relayURL = strings.TrimSpace(relayURL)
+	if s.relayURL == "" {
+		return
+	}
+	// M5.1a caveat: Client.Start() is not itself guarded against double
+	// invocation, so a client instance must be started exactly once. That
+	// holds here because every apply builds a FRESH client and never calls
+	// Start on an existing one.
+	c := relayclient.NewClient(s.relayURL, s.token, s.store)
+	c.Start(context.Background())
+	s.relayClient = c
+}
+
+// StopRelay stops the current relay client and clears the setting (the
+// graceful-shutdown path; the process is exiting, so persistence is not
+// touched).
+func (s *Server) StopRelay() {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.stopRelayLocked()
+}
+
+// stopRelayLocked stops the current relay client (if any). Caller holds
+// relayMu.
+func (s *Server) stopRelayLocked() {
+	if s.relayClient != nil {
+		s.relayClient.Stop()
+		s.relayClient = nil
+	}
+	s.relayURL = ""
+}
+
+// relayStateLocked snapshots the relay state. Caller holds relayMu.
+func (s *Server) relayStateLocked() relayStatus {
+	return relayStatus{
+		URL:       s.relayURL,
+		Active:    s.relayURL != "",
+		Connected: s.relayClient != nil && s.relayClient.Connected(),
+	}
 }
 
 // startStatsHeartbeat starts the periodic `stats` broadcast loop (M4b): a

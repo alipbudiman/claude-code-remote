@@ -2,11 +2,14 @@ package com.claudecode.remote
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.webkit.*
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -18,6 +21,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var notificationHelper: NotificationHelper
     private lateinit var batteryHelper: BatteryOptimizationHelper
+
+    companion object {
+        // requestCode for the on-demand CAMERA permission flow (M11). 101 is
+        // taken by the POST_NOTIFICATIONS request in onCreate.
+        private const val CAMERA_PERMISSION_REQUEST_CODE = 102
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,21 +53,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // M8: request CAMERA for the in-app QR scanner (WebView getUserMedia).
-        // The WebView page runs from the secure appassets origin and the
-        // WebChromeClient below auto-grants web-level permission requests,
-        // but Android requires this app-level grant before the WebView can
-        // open the camera at all. Runtime permission since API 23 (M).
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-                != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.CAMERA),
-                    102
-                )
-            }
-        }
+        // M11: CAMERA is no longer requested blindly here. The QR scanner now
+        // asks on demand through the AndroidBridge (requestCameraPermission),
+        // so the user only sees the prompt with the scanner in front of them —
+        // see WebAppInterface below.
 
         webView = WebView(this)
         setContentView(webView)
@@ -91,6 +89,35 @@ class MainActivity : AppCompatActivity() {
                 "if(window.__onBatteryStatusUpdate){window.__onBatteryStatusUpdate($isUnrestricted);}",
                 null
             )
+        }
+    }
+
+    /**
+     * Delivers the CAMERA permission result to the WebView (M11). Same
+     * evaluateJavascript push pattern as pushBatteryStatusToWebView: the
+     * React scanner registers window.__onCameraPermission before requesting,
+     * so a page reload between request and result degrades gracefully.
+     */
+    private fun notifyCameraPermission(granted: Boolean) {
+        webView.post {
+            webView.evaluateJavascript(
+                "window.__onCameraPermission && window.__onCameraPermission($granted)",
+                null
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // M11: forward the on-demand CAMERA result to the WebView scanner.
+        if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            notifyCameraPermission(granted)
         }
     }
 
@@ -244,6 +271,66 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun openBatterySettings() {
             batteryHelper.openBatteryOptimizationSettings()
+        }
+
+        /**
+         * M11: whether the app-level CAMERA permission (a prerequisite for
+         * the WebView to open the camera at all) is currently granted.
+         */
+        @JavascriptInterface
+        fun hasCameraPermission(): Boolean =
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+
+        /**
+         * M11: on-demand CAMERA permission flow for the QR scanner. Runs on
+         * the main thread: if the grant somehow already landed, the WebView is
+         * told immediately; otherwise a brief rationale dialog explains why
+         * the camera is needed, and Allow triggers the real system prompt
+         * (requestCode 102, answered in onRequestPermissionsResult). "Not
+         * now" dismisses and leaves the WebView's manual fallback.
+         */
+        @JavascriptInterface
+        fun requestCameraPermission() {
+            webView.post {
+                if (hasCameraPermission()) {
+                    notifyCameraPermission(true)
+                    return@post
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Camera permission")
+                    .setMessage("Camera access is needed to scan the server QR code.")
+                    .setPositiveButton("Allow") { _, _ ->
+                        ActivityCompat.requestPermissions(
+                            this@MainActivity,
+                            arrayOf(Manifest.permission.CAMERA),
+                            CAMERA_PERMISSION_REQUEST_CODE
+                        )
+                    }
+                    .setNegativeButton("Not now") { dialog, _ -> dialog.dismiss() }
+                    .show()
+            }
+        }
+
+        /**
+         * M11: escape hatch for the permanently-denied ("don't ask again")
+         * state, where no in-app prompt can appear again — opens this app's
+         * page in system settings so the user can flip the toggle there.
+         */
+        @JavascriptInterface
+        fun openAppSettings() {
+            webView.post {
+                try {
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", packageName, null)
+                    )
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e("ClaudeRemote", "openAppSettings failed: ${e.message}")
+                }
+            }
         }
     }
 
