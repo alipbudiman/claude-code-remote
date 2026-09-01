@@ -2,10 +2,6 @@
 
 Real-time session monitoring for [Claude Code](https://github.com/anthropics/claude-code), from your phone.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/YOUR-TEMPLATE-ID?ref=github-alipbudiman)
-
-> **Note:** the button above requires a Railway template published once by the repository owner. To publish it: open the project in Railway, go to **Settings → Templates → Create Template** (or visit <https://railway.com/templates/create>), publish the template from the `claude-remote-relay` service, then replace `YOUR-TEMPLATE-ID` in the button link with the template code you receive. Until the template is published, use the manual steps in [Anywhere access](#anywhere-access-deploy-your-own-relay) — they work today.
-
 [![Build APK](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-apk.yml/badge.svg)](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-apk.yml)
 [![Build Server](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml/badge.svg)](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -86,7 +82,8 @@ Download the APK — `claude-remote.apk` from [Releases](https://github.com/alip
 
 Default mode is LAN-only. To monitor from any network — mobile data, office, school — deploy the relay hub to [Railway](https://railway.com). The desktop server dials out to it, so no port-forwarding or public IP is needed; phones then connect to the same relay URL with the same token.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/YOUR-TEMPLATE-ID?ref=github-alipbudiman)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/claude-stat-remote?referralCode=jH5Z9g&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 
 Manual alternative:
 
