@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
-import { X, Network, Check, RefreshCw, Smartphone, KeyRound, Cloud } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { X, Network, Check, RefreshCw, Smartphone, KeyRound, Cloud, QrCode } from 'lucide-react';
+import jsQR from 'jsqr';
 import { wsService } from '../services/websocketService';
+import { parseScannedQR, looksLikeToken } from '../services/qrParse';
 
 interface ConnectionModalProps {
   isOpen: boolean;
@@ -25,6 +27,125 @@ const isValidServerUrl = (raw: string): boolean => {
   }
 };
 
+// M8: fullscreen camera overlay for scanning the server's terminal QR
+// (http://<lan-ip>:9280/?token=<64hex>). Mount-scoped lifecycle: the
+// getUserMedia stream and the rAF decode loop are torn down in the effect
+// cleanup, so closing the overlay — or the modal returning null — can never
+// leave the camera running.
+const QrScannerOverlay: React.FC<{
+  onScanned: (text: string) => void;
+  onCancel: () => void;
+}> = ({ onScanned, onCancel }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const [cameraError, setCameraError] = useState(false);
+
+  // Callback in a ref so a parent re-render mid-scan (fresh inline arrow)
+  // never restarts the camera.
+  const onScannedRef = useRef(onScanned);
+  onScannedRef.current = onScanned;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const stopScan = () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+
+    const tick = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+        const w = video.videoWidth;
+        const h = video.videoHeight;
+        if (w > 0 && h > 0) {
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, w, h);
+            const frame = ctx.getImageData(0, 0, w, h);
+            // attemptBoth: terminal QRs are dark-on-light, but the inverse
+            // costs little and covers light-on-dark renders.
+            const code = jsQR(frame.data, w, h, { inversionAttempts: 'attemptBoth' });
+            if (code && code.data) {
+              stopScan();
+              onScannedRef.current(code.data);
+              return;
+            }
+          }
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: 'environment' } })
+      .then((stream) => {
+        if (cancelled) {
+          // Unmount raced the grant: nobody is listening anymore.
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {
+            // Muted autoplay failing would be exceptional; without frames
+            // the loop simply keeps waiting, and the user can Cancel.
+          });
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      })
+      .catch(() => {
+        // Denied / no camera: graceful manual-entry fallback, no crash.
+        if (!cancelled) setCameraError(true);
+      });
+
+    return () => {
+      cancelled = true;
+      stopScan();
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center p-6 bg-black/95">
+      <div className="w-full max-w-xs">
+        <div className="relative w-full aspect-square rounded-2xl overflow-hidden border-2 border-[#D97757]/50 bg-black">
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+          <div className="absolute inset-6 rounded-xl border border-white/30 pointer-events-none" />
+        </div>
+        <canvas ref={canvasRef} className="hidden" />
+        <p className={`mt-4 text-center text-xs ${cameraError ? 'text-red-400' : 'text-slate-300'}`}>
+          {cameraError
+            ? 'Kamera tidak tersedia/diizinkan — isi manual'
+            : 'Arahkan kamera ke QR di terminal server'}
+        </p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="mt-4 w-full py-3 rounded-xl bg-white/5 border border-white/10 text-slate-200 font-bold text-sm hover:bg-white/10 transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   isOpen,
   onClose,
@@ -46,6 +167,10 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   // Which URL field failed validation (null = none). Same isValidServerUrl
   // check as before — the error is just surfaced on the field being saved.
   const [urlErrorField, setUrlErrorField] = useState<'railway' | 'lan' | null>(null);
+  // M8: QR scanner overlay visibility, and whether the token field currently
+  // holds a scanned non-URL value that is not a well-formed token.
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [tokenError, setTokenError] = useState(false);
 
   if (!isOpen) return null;
 
@@ -65,6 +190,15 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
     }
   };
 
+  // M8: the one save sequence shared by the Save button and the QR scan —
+  // persist URL + token, mirror them into the native MonitoringService, close.
+  const saveAndClose = (url: string, token: string) => {
+    onSaveUrl(url);
+    wsService.setToken(token);
+    syncNativeConfig();
+    onClose();
+  };
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     // M6: whichever field is non-empty wins; when both are filled the
@@ -76,16 +210,44 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
       return;
     }
     setUrlErrorField(null);
-    onSaveUrl(chosen);
-    wsService.setToken(inputToken);
-    syncNativeConfig();
-    onClose();
+    saveAndClose(chosen, inputToken);
+  };
+
+  // M8: one-step QR setup. The desktop terminal QR encodes
+  // http://<lan-ip>:9280/?token=<64hex> — a URL scan fills the matching
+  // field (http → LAN, https → Railway) and saves through the exact same
+  // sequence as the Save button, so the modal closes and the app connects
+  // with zero typing. A non-URL scan (raw token / plain text) only fills
+  // the token field: no URL is known, so nothing is auto-saved.
+  const handleScanned = (text: string) => {
+    setScannerOpen(false);
+    const parsed = parseScannedQR(text);
+    if (parsed.kind === 'url') {
+      // Scanning expresses explicit intent to use THIS server: clear the
+      // other URL field so the save precedence (Railway wins when both are
+      // filled) resolves to the scanned one.
+      if (parsed.targetField === 'railway') {
+        setRailwayUrl(parsed.base);
+        setLanUrl('');
+      } else {
+        setLanUrl(parsed.base);
+        setRailwayUrl('');
+      }
+      setUrlErrorField(null);
+      setTokenError(false);
+      if (parsed.token) setInputToken(parsed.token);
+      saveAndClose(parsed.base, parsed.token || inputToken);
+    } else {
+      setInputToken(parsed.token);
+      setTokenError(!looksLikeToken(parsed.token));
+    }
   };
 
   // M4b: forget the token everywhere (localStorage + native service config,
   // which reads getToken() === '' after clearToken) and reconnect without it.
   const handleClearToken = () => {
     setInputToken('');
+    setTokenError(false);
     wsService.clearToken();
     syncNativeConfig();
   };
@@ -120,6 +282,17 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
         </div>
 
         <form onSubmit={handleSave} className="space-y-4">
+          {/* M8: one-step setup — scan the terminal QR to fill URL + token
+              and connect immediately. */}
+          <button
+            type="button"
+            onClick={() => setScannerOpen(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-black/30 border border-white/10 text-sm font-semibold text-slate-200 hover:border-[#D97757]/40 transition-colors"
+          >
+            <QrCode size={16} className="text-[#D97757]" />
+            Scan QR
+          </button>
+
           {/* M6: online path — the Railway relay URL (https). Pre-filled when
               the saved URL is already a remote one. */}
           <div>
@@ -196,13 +369,23 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               <input
                 type="password"
                 value={inputToken}
-                onChange={(e) => setInputToken(e.target.value)}
+                onChange={(e) => {
+                  setInputToken(e.target.value);
+                  setTokenError(false);
+                }}
                 placeholder="64-char token from desktop QR / URL"
                 autoComplete="off"
                 spellCheck={false}
-                className="w-full pl-9 pr-4 py-3 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]"
+                className={`w-full pl-9 pr-4 py-3 rounded-xl bg-black/40 border ${
+                  tokenError ? 'border-red-500/70' : 'border-white/10'
+                } text-white placeholder-slate-600 font-mono text-sm focus:outline-none focus:border-[#D97757]`}
               />
             </div>
+            {tokenError && (
+              <p className="text-[11px] text-red-400 mt-1">
+                Hasil scan bukan URL server — bukan juga token 64-karakter yang valid
+              </p>
+            )}
             <p className="text-[11px] text-slate-500 mt-1">
               Authentication token — scan the desktop QR code or copy <code>?token=...</code> from the server URL
             </p>
@@ -248,6 +431,14 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
           </p>
         </div>
       </div>
+
+      {/* M8: camera QR scanner overlay — z-above the modal itself. */}
+      {scannerOpen && (
+        <QrScannerOverlay
+          onScanned={handleScanned}
+          onCancel={() => setScannerOpen(false)}
+        />
+      )}
     </div>
   );
 };

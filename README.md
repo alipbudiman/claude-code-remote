@@ -55,6 +55,8 @@ Jalankan server desktop dengan `claude-remote-server.exe -port 9280 --relay wss:
 2. Isi **Railway URL** `https://<domain-relay-anda>` + **Token** (isi file `claude-remote-token` di PC).
 3. Status & notifikasi mengalir dari jaringan mana pun (selular/sekolah/kantor).
 
+Tips: **Scan QR** — tombol **Scan QR** di pengaturan aplikasi → arahkan ke QR di terminal server → URL + token terisi otomatis dan langsung tersambung.
+
 ### 4. Catatan Keamanan
 
 Token = kunci room relay. Siapa pun yang memegang token bisa membaca stream status — **jangan dibagikan**. Rotasi token: hapus `~/.claude/claude-remote-token` lalu restart server (token baru otomatis dibuat), kemudian perbarui token di HP.
@@ -214,6 +216,8 @@ bin\claude-remote-server.exe -uninstall
 2. Jika belum otomatis terhubung, klik tombol **Settings (ikon gear/WiFi)** di pojok kanan atas.
 3. Masukkan IP PC Anda (contoh: `http://192.168.100.48:9280`) lalu klik **Connect Server**.
 4. Tekan ikon **Lonceng (Bell)** untuk mengaktifkan izin notifikasi getar & pop-up di HP Anda.
+
+Cara tercepat: tombol **Scan QR** di pengaturan aplikasi → arahkan ke QR di terminal server → URL + token terisi otomatis dan langsung tersambung.
 
 ---
 

@@ -44,6 +44,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // M8: request CAMERA for the in-app QR scanner (WebView getUserMedia).
+        // The WebView page runs from the secure appassets origin and the
+        // WebChromeClient below auto-grants web-level permission requests,
+        // but Android requires this app-level grant before the WebView can
+        // open the camera at all. Runtime permission since API 23 (M).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.CAMERA),
+                    102
+                )
+            }
+        }
+
         webView = WebView(this)
         setContentView(webView)
 
