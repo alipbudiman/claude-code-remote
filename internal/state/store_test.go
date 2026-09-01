@@ -430,7 +430,166 @@ func TestWaitingPermissionStaleDowngrade(t *testing.T) {
 	}
 }
 
-// --- 10. snapshot hygiene: 24h eviction + 20-session cap + deterministic pick -
+// --- 10. M9: Stop completion semantics — completed status + exactly-once ------
+
+// A real turn (hook-delivered PreToolUse → Stop) must leave the session idle
+// with an explicit completed display ("✅ Task completed"), a LastCompletedAt
+// timestamp, and exactly one task_done notification.
+func TestRealStopMarksCompletedWithTimestamp(t *testing.T) {
+	s := newTestStore(time.Hour)
+
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "PreToolUse",
+		SessionID:     "s1",
+		ToolName:      "Bash",
+		ToolUseID:     "t1",
+	})
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "Stop",
+		SessionID:     "s1",
+	})
+
+	sess := mustSession(t, s, "s1")
+	if sess.Status != models.StatusIdle {
+		t.Fatalf("status after Stop = %q, want %q", sess.Status, models.StatusIdle)
+	}
+	if sess.CurrentToolStatus != "✅ Task completed" {
+		t.Fatalf("tool status after Stop = %q, want %q", sess.CurrentToolStatus, "✅ Task completed")
+	}
+	if sess.LastCompletedAt == nil {
+		t.Fatal("LastCompletedAt = nil after Stop, want timestamp")
+	}
+	if got := countNotifType(s, "task_done"); got != 1 {
+		t.Fatalf("task_done notifications = %d, want exactly 1 (got all: %+v)", got, s.GetSnapshot().Notifications)
+	}
+}
+
+// --- 11. M9: watcher-synthesized Stop completes AND notifies; real Stop dedupes
+
+// Watcher-tracked sessions never receive the real Stop hook. The watcher's
+// transcript-based Stop (Source:"watcher") must run the SAME completion path
+// as the real hook — including the task_done notification, exactly once. A
+// follow-up real Stop on the already-idle session is a full no-op.
+func TestWatcherStopNotifiesAndRealStopAfterIsNoOp(t *testing.T) {
+	s := newTestStore(time.Hour)
+
+	// Watcher-only session: transcript backfill drives the whole turn.
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "PreToolUse",
+		SessionID:     "s1",
+		ToolName:      "Bash",
+		ToolUseID:     "t1",
+		Source:        "watcher",
+	})
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "PostToolUse",
+		SessionID:     "s1",
+		ToolUseID:     "t1",
+		Source:        "watcher",
+	})
+	if got := notifCount(s); got != 0 {
+		t.Fatalf("setup: notifications = %d, want 0 (watcher tool backfill never notifies)", got)
+	}
+
+	// The watcher sees Claude's final text answer and synthesizes Stop.
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "Stop",
+		SessionID:     "s1",
+		Source:        "watcher",
+	})
+
+	sess := mustSession(t, s, "s1")
+	if sess.Status != models.StatusIdle {
+		t.Fatalf("status after watcher Stop = %q, want %q", sess.Status, models.StatusIdle)
+	}
+	if sess.CurrentToolStatus != "✅ Task completed" {
+		t.Fatalf("tool status after watcher Stop = %q, want %q", sess.CurrentToolStatus, "✅ Task completed")
+	}
+	if sess.LastCompletedAt == nil {
+		t.Fatal("LastCompletedAt = nil after watcher Stop, want timestamp")
+	}
+	if got := countNotifType(s, "task_done"); got != 1 {
+		t.Fatalf("task_done after watcher Stop = %d, want 1 (watcher Stop is a completion source)", got)
+	}
+	completedAt := *sess.LastCompletedAt
+
+	// The real Stop hook arrives late (hook delivery eventually recovered):
+	// the session is already idle — no second notification, no state churn.
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "Stop",
+		SessionID:     "s1",
+	})
+
+	sess = mustSession(t, s, "s1")
+	if got := countNotifType(s, "task_done"); got != 1 {
+		t.Fatalf("task_done after duplicate real Stop = %d, want still 1", got)
+	}
+	if sess.Status != models.StatusIdle {
+		t.Fatalf("status after duplicate Stop = %q, want %q", sess.Status, models.StatusIdle)
+	}
+	if sess.LastCompletedAt == nil || !sess.LastCompletedAt.Equal(completedAt) {
+		t.Fatalf("LastCompletedAt changed by duplicate Stop: %v, want %v", sess.LastCompletedAt, completedAt)
+	}
+}
+
+// --- 12. M9: double watcher Stop → still exactly one task_done ----------------
+
+func TestDoubleWatcherStopSingleTaskDone(t *testing.T) {
+	s := newTestStore(time.Hour)
+
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "PreToolUse",
+		SessionID:     "s1",
+		ToolName:      "Bash",
+		ToolUseID:     "t1",
+		Source:        "watcher",
+	})
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "Stop",
+		SessionID:     "s1",
+		Source:        "watcher",
+	})
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "Stop",
+		SessionID:     "s1",
+		Source:        "watcher",
+	})
+
+	if got := countNotifType(s, "task_done"); got != 1 {
+		t.Fatalf("task_done after double watcher Stop = %d, want exactly 1", got)
+	}
+	sess := mustSession(t, s, "s1")
+	if sess.Status != models.StatusIdle {
+		t.Fatalf("status after double watcher Stop = %q, want %q", sess.Status, models.StatusIdle)
+	}
+}
+
+// --- 13. M9: a new turn clears the completion marker --------------------------
+
+// taskCompleted is derived as idle+last_completed_at: a NEW turn must clear
+// the marker so a stale completion can never read as "this turn finished".
+func TestNewTurnClearsLastCompletedAt(t *testing.T) {
+	s := newTestStore(time.Hour)
+
+	s.HandleHookEvent(models.HookPayload{
+		HookEventName: "PreToolUse", SessionID: "s1", ToolName: "Bash", ToolUseID: "t1",
+	})
+	s.HandleHookEvent(models.HookPayload{HookEventName: "Stop", SessionID: "s1"})
+	if sess := mustSession(t, s, "s1"); sess.LastCompletedAt == nil {
+		t.Fatal("setup: LastCompletedAt should be set after Stop")
+	}
+
+	s.HandleHookEvent(models.HookPayload{HookEventName: "UserPromptSubmit", SessionID: "s1"})
+	sess := mustSession(t, s, "s1")
+	if sess.LastCompletedAt != nil {
+		t.Fatalf("LastCompletedAt after UserPromptSubmit = %v, want nil (new turn started)", sess.LastCompletedAt)
+	}
+	if sess.Status != models.StatusActive {
+		t.Fatalf("status after UserPromptSubmit = %q, want %q", sess.Status, models.StatusActive)
+	}
+}
+
+// --- 14. snapshot hygiene: 24h eviction + 20-session cap + deterministic pick -
 
 func TestSnapshotEvictionCapAndDeterministicActiveSession(t *testing.T) {
 	s := newTestStore(time.Hour)

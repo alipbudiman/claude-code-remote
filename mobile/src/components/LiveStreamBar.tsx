@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Radio, Pause, ChevronUp, ChevronDown, Activity, Bot, Sparkles } from 'lucide-react';
+import { Radio, Pause, ChevronUp, ChevronDown, Activity, Bot, Sparkles, CheckCircle2 } from 'lucide-react';
 import { Session } from '../types';
 import ColorIcon from '../assets/claudecode-color.svg';
 import MonoIcon from '../assets/claudecode.svg';
@@ -7,11 +7,15 @@ import MonoIcon from '../assets/claudecode.svg';
 interface LiveStreamBarProps {
   session?: Session;
   isWorking: boolean;
+  // M9: true when the session went idle on a VERIFIED turn-end
+  // (last_completed_at set, no new turn started since).
+  taskCompleted: boolean;
 }
 
 export const LiveStreamBar: React.FC<LiveStreamBarProps> = ({
   session,
   isWorking,
+  taskCompleted,
 }) => {
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
@@ -49,6 +53,8 @@ export const LiveStreamBar: React.FC<LiveStreamBarProps> = ({
           className={`relative overflow-hidden rounded-2xl p-3 backdrop-blur-xl border transition-all duration-300 shadow-2xl cursor-pointer ${
             isWaitingInput
               ? 'bg-[#1e1710]/95 border-amber-500/60 shadow-[0_0_25px_rgba(245,158,11,0.25)]'
+              : taskCompleted
+              ? 'bg-[#101a14]/95 border-emerald-500/50 shadow-[0_0_25px_rgba(16,185,129,0.2)]'
               : isWorking
               ? 'bg-[#181a24]/95 border-[#D97757]/50 shadow-[0_0_25px_rgba(217,119,87,0.25)]'
               : 'bg-[#12131a]/95 border-white/10'
@@ -95,20 +101,37 @@ export const LiveStreamBar: React.FC<LiveStreamBarProps> = ({
                   className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded-full uppercase tracking-wider ${
                     isWaitingInput
                       ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
+                      : taskCompleted
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                       : isWorking
                       ? 'bg-[#D97757]/20 text-[#ffaa88] border border-[#D97757]/40'
                       : 'bg-slate-800 text-slate-400 border border-slate-700'
                   }`}
                 >
-                  {isWaitingInput ? 'INPUT NEEDED' : isWorking ? 'LIVE STREAM' : 'PAUSED'}
+                  {isWaitingInput
+                    ? 'INPUT NEEDED'
+                    : taskCompleted
+                    ? 'COMPLETED'
+                    : isWorking
+                    ? 'LIVE STREAM'
+                    : 'PAUSED'}
                 </span>
                 <span className="text-[11px] font-mono text-slate-400 truncate">
                   {artistName}
                 </span>
               </div>
 
+              {/* M9: on completion show the check icon + plain label instead of
+                  the raw server string — no emoji to truncate behind the ellipsis. */}
               <div className="text-xs font-bold text-white truncate leading-tight">
-                {trackTitle}
+                {taskCompleted ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <CheckCircle2 size={13} className="text-emerald-400 shrink-0" />
+                    Task completed
+                  </span>
+                ) : (
+                  trackTitle
+                )}
               </div>
             </div>
 

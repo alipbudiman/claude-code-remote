@@ -279,6 +279,20 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		s.sessions[payload.SessionID] = sess
 	}
 
+	// M9 duplicate-Stop guard: turn completion has three sources — the real
+	// Stop hook, the watcher's transcript-based turn-end (Source:"watcher"),
+	// and the stall fallback. The FIRST to arrive completes the turn; any
+	// later Stop on an already-idle/ended session is a full no-op (no state
+	// change, no log line, no second task_done). A working session (active,
+	// subagent_running, or waiting_permission — e.g. a question the user
+	// dismissed before the turn ended) has not completed yet, so its Stop
+	// still runs the completion path.
+	if payload.HookEventName == "Stop" &&
+		(sess.Status == models.StatusIdle || sess.Status == models.StatusCompleted) {
+		s.mu.Unlock()
+		return
+	}
+
 	sess.LastActivity = time.Now()
 	// New activity ends any stall episode, re-arming the stalled notification.
 	delete(s.stallNotified, payload.SessionID)
@@ -340,11 +354,13 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		sess.Status = models.StatusActive
 		sess.TurnActive = true
 		sess.PendingQuestion = nil
+		sess.LastCompletedAt = nil
 		sess.CurrentToolStatus = "Working on your prompt…"
 		appendLog("User prompt submitted")
 
 	case "PreToolUse":
 		sess.TurnActive = true
+		sess.LastCompletedAt = nil
 		sess.CurrentTool = payload.ToolName
 		statusDesc := hooks.FormatToolStatus(payload.ToolName, payload.ToolInput)
 		sess.CurrentToolStatus = statusDesc
@@ -571,7 +587,11 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 
 	case "Stop":
-		// Turn finished: complete all remaining subagents and retire tools.
+		// Turn finished (real hook or watcher-synthesized turn-end — the
+		// duplicate-Stop guard above guarantees a working session): complete
+		// all remaining subagents and retire tools. The explicit completed
+		// display also drives the FGS ongoing notification, so the shade
+		// says the task COMPLETED instead of a generic "idling".
 		t := time.Now()
 		for id, sub := range sess.ActiveSubagents {
 			sub.CompletedAt = &t
@@ -584,10 +604,11 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		sess.Status = models.StatusIdle
 		sess.TurnActive = false
 		sess.CurrentTool = ""
-		sess.CurrentToolStatus = "Idling (Ready for prompt)"
+		sess.CurrentToolStatus = "✅ Task completed"
 		sess.PendingQuestion = nil
 		sess.ActiveToolIDs = make(map[string]string)
-		appendLog("Turn finished (Ready for prompt)")
+		sess.LastCompletedAt = &t
+		appendLog("Turn finished (task completed)")
 		notifTitle = "✅ Task Completed"
 		notifBody = fmt.Sprintf("Claude Code finished working on %s and is ready for your next prompt.", sess.ProjectName)
 		notifType = "task_done"
@@ -635,10 +656,15 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 	})
 
 	// The watcher and the boot replay are redundancy/history channels: they
-	// may backfill state, but they must never raise heads-up notifications.
-	// Only live hook events (Source "") notify — this also covers spool
-	// drain, which feeds real events with Source "".
-	if notifTitle != "" && payload.Source == "" {
+	// may backfill state, but they must never raise heads-up notifications —
+	// with ONE exception (M9): the watcher-synthesized Stop is a completion
+	// source in its own right (watcher-tracked sessions have no hook channel
+	// to deliver the task_done alert), so it must notify. The duplicate-Stop
+	// guard keeps that exactly once per turn. Boot replay (Source "replay")
+	// still never notifies, and live hook events (Source "") always do —
+	// this also covers spool drain, which feeds real events with Source "".
+	if notifTitle != "" &&
+		(payload.Source == "" || (payload.Source == "watcher" && payload.HookEventName == "Stop")) {
 		s.AddNotification(sess.ID, notifTitle, notifBody, notifType)
 	}
 }

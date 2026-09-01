@@ -52,11 +52,15 @@ type Session struct {
 	SubagentHistory   []*Subagent          `json:"subagent_history"`
 	ActiveToolIDs     map[string]string    `json:"active_tool_ids"`
 	TurnActive        bool                 `json:"turn_active"` // true between UserPromptSubmit/PreToolUse and Stop
-	TranscriptPath    string               `json:"transcript_path"`
-	StartTime         time.Time            `json:"start_time"`
-	LastActivity      time.Time            `json:"last_activity"`
-	LinesProcessed    int                  `json:"lines_processed"`
-	RecentLogs        []string             `json:"recent_logs"`
+	// LastCompletedAt is stamped by a verified turn-end (real Stop hook or
+	// watcher-synthesized Stop); nil while working or after a stall fallback.
+	// Drives the app's explicit "Task Completed" display (idle + set = done).
+	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
+	TranscriptPath  string     `json:"transcript_path"`
+	StartTime       time.Time  `json:"start_time"`
+	LastActivity    time.Time  `json:"last_activity"`
+	LinesProcessed  int        `json:"lines_processed"`
+	RecentLogs      []string   `json:"recent_logs"`
 }
 
 // HookPayload represents the JSON payload received from Claude Code hooks

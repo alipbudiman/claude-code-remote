@@ -321,6 +321,91 @@ func (tw *TranscriptWatcher) handleUserRecord(sess *models.Session, record map[s
 	}
 }
 
+// handleAssistantRecord processes assistant-role transcript records. Two
+// jobs, both watcher-synthesized (Source:"watcher"):
+//
+//  1. tool_use synthesis: register each tool_use block as a PreToolUse so a
+//     session the hook bridge never tracked still shows live tool activity.
+//
+//  2. turn-end detection (M9): when the record IS Claude's final answer for
+//     the turn, feed the store a Stop. Watcher-tracked sessions (subagents,
+//     sessions whose hook delivery failed) never receive the real Stop hook;
+//     without this they hang on their "last tool" until the stall fallback.
+//
+// Observed shape (2026-09-01, real transcripts under ~/.claude/projects/,
+// 3 projects / ~1350 assistant records sampled):
+//
+//	{"type":"assistant","message":{"id":"msg_…","role":"assistant",
+//	  "stop_reason":"end_turn","content":[{"type":"text","text":"…"}]}, …}
+//
+// Content blocks stream as SEPARATE records sharing one message.id
+// (thinking → text → tool_use…), and every record of a message carries that
+// message's stop_reason. The naive "record is all text blocks" rule does NOT
+// identify a final answer: mid-turn narration text records — same message
+// that later streams tool_use blocks — are extremely common (288 samples vs
+// 31 true finals) but carry stop_reason:"tool_use". Only the turn's final
+// answer message carries stop_reason:"end_turn" (each such message also
+// streams a thinking-only record first; thinking alone is NEVER a turn-end).
+// stop_reason:"stop_sequence" also occurs and is NOT treated as a turn-end.
+// So the rule "≥1 text block, 0 tool_use blocks, stop_reason=end_turn" fires
+// exactly once per completed turn and never mid-turn.
+func (tw *TranscriptWatcher) handleAssistantRecord(sess *models.Session, record map[string]interface{}) {
+	var blocks []interface{}
+	var stopReason string
+	if msg, ok := record["message"].(map[string]interface{}); ok {
+		if content, ok := msg["content"].([]interface{}); ok {
+			blocks = content
+		}
+		stopReason, _ = msg["stop_reason"].(string)
+	} else if content, ok := record["content"].([]interface{}); ok {
+		blocks = content
+	}
+
+	hasText, hasToolUse := false, false
+	for _, b := range blocks {
+		block, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch bType, _ := block["type"].(string); bType {
+		case "tool_use":
+			hasToolUse = true
+			toolName, _ := block["name"].(string)
+			toolID, _ := block["id"].(string)
+			input, _ := block["input"].(map[string]interface{})
+
+			// Watcher-synthesized events are a redundancy channel:
+			// Source="watcher" lets the store dedup replays of ids
+			// the hooks already delivered and suppress notifications.
+			tw.store.HandleHookEvent(models.HookPayload{
+				HookEventName: "PreToolUse",
+				SessionID:     sess.ID,
+				ToolName:      toolName,
+				ToolUseID:     toolID,
+				ToolInput:     input,
+				Cwd:           sess.ProjectDir,
+				Source:        "watcher",
+			})
+		case "text":
+			hasText = true
+		}
+	}
+
+	// Turn-end: the final answer's text record — a text block, no tool call
+	// in the same record, and the message ended on its own ("end_turn").
+	// Source="watcher" marks the synthesized Stop; the store's duplicate-Stop
+	// guard keeps the completion and its task_done notification exactly-once
+	// per turn no matter which source arrives first.
+	if hasText && !hasToolUse && stopReason == "end_turn" {
+		tw.store.HandleHookEvent(models.HookPayload{
+			HookEventName: "Stop",
+			SessionID:     sess.ID,
+			Cwd:           sess.ProjectDir,
+			Source:        "watcher",
+		})
+	}
+}
+
 func (tw *TranscriptWatcher) handleTranscriptRecord(sess *models.Session, record map[string]interface{}) {
 	recordType, _ := record["type"].(string)
 
@@ -330,37 +415,6 @@ func (tw *TranscriptWatcher) handleTranscriptRecord(sess *models.Session, record
 	}
 
 	if recordType == "assistant" {
-		var blocks []interface{}
-		if msg, ok := record["message"].(map[string]interface{}); ok {
-			if content, ok := msg["content"].([]interface{}); ok {
-				blocks = content
-			}
-		} else if content, ok := record["content"].([]interface{}); ok {
-			blocks = content
-		}
-
-		for _, b := range blocks {
-			if block, ok := b.(map[string]interface{}); ok {
-				bType, _ := block["type"].(string)
-				if bType == "tool_use" {
-					toolName, _ := block["name"].(string)
-					toolID, _ := block["id"].(string)
-					input, _ := block["input"].(map[string]interface{})
-
-					// Watcher-synthesized events are a redundancy channel:
-					// Source="watcher" lets the store dedup replays of ids
-					// the hooks already delivered and suppress notifications.
-					tw.store.HandleHookEvent(models.HookPayload{
-						HookEventName: "PreToolUse",
-						SessionID:     sess.ID,
-						ToolName:      toolName,
-						ToolUseID:     toolID,
-						ToolInput:     input,
-						Cwd:           sess.ProjectDir,
-						Source:        "watcher",
-					})
-				}
-			}
-		}
+		tw.handleAssistantRecord(sess, record)
 	}
 }

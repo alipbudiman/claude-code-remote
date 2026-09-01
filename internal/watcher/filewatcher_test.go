@@ -105,7 +105,102 @@ func TestUserPromptRecordTriggersNothing(t *testing.T) {
 		t.Fatalf("ActiveToolIDs after plain user records = %v, want empty", tools)
 	}
 	if got := len(s.GetSnapshot().Notifications); got != 0 {
-		t.Fatalf("notifications = %d, want 0 (watcher never notifies)", got)
+		t.Fatalf("notifications = %d, want 0 (user records never notify)", got)
+	}
+}
+
+// --- 1b. M9: transcript-based turn-end detection -------------------------------
+
+// sessionState fetches a session for assertions (nil if absent).
+func sessionState(t *testing.T, s *state.Store, sessionID string) *models.Session {
+	t.Helper()
+	for _, sess := range s.GetSnapshot().Sessions {
+		if sess.ID == sessionID {
+			return sess
+		}
+	}
+	return nil
+}
+
+// A transcript turn that ends with a final text answer (stop_reason
+// "end_turn": thinking block first, then the text block) must synthesize a
+// watcher-source Stop: the session goes idle with the explicit completed
+// display and exactly one task_done notification — even though no hook ever
+// fired (the watcher-tracked subagent case).
+func TestFinalTextRecordSynthesizesStop(t *testing.T) {
+	projects := filepath.Join(t.TempDir(), "projects")
+	offsets := filepath.Join(t.TempDir(), "offsets.json")
+	s := state.NewStore(0, nil)
+	tw := NewTranscriptWatcherWithPaths(s, projects, offsets)
+
+	writeTranscript(t, projects, "proj", "sess-1", strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg_a","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"go build ./..."}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}]}}`,
+		`{"type":"assistant","message":{"id":"msg_b","role":"assistant","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"wrapping up…"}]}}`,
+		`{"type":"assistant","message":{"id":"msg_b","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Done. The build passes."}]}}`,
+	}, "\n")+"\n")
+
+	tw.scan()
+
+	sess := sessionState(t, s, "sess-1")
+	if sess == nil {
+		t.Fatal("session sess-1 not created by watcher scan")
+	}
+	if sess.Status != models.StatusIdle {
+		t.Fatalf("status after final text record = %q, want %q (synthesized Stop)", sess.Status, models.StatusIdle)
+	}
+	if sess.CurrentToolStatus != "✅ Task completed" {
+		t.Fatalf("tool status after final text record = %q, want %q", sess.CurrentToolStatus, "✅ Task completed")
+	}
+	if sess.LastCompletedAt == nil {
+		t.Fatal("LastCompletedAt = nil after synthesized Stop, want timestamp")
+	}
+	taskDone := 0
+	for _, notif := range s.GetSnapshot().Notifications {
+		if notif.Type == "task_done" {
+			taskDone++
+		}
+	}
+	if taskDone != 1 {
+		t.Fatalf("task_done notifications = %d, want exactly 1 (got all: %+v)", taskDone, s.GetSnapshot().Notifications)
+	}
+}
+
+// Mid-turn records must NOT synthesize a Stop: a narration text record that is
+// part of a message which later streams tool_use blocks (stop_reason
+// "tool_use"), a record containing a tool_use block, and a thinking-only
+// end_turn record (the final answer's reasoning chunk — the text block has not
+// arrived yet) are all silent.
+func TestMidTurnRecordsDoNotSynthesizeStop(t *testing.T) {
+	projects := filepath.Join(t.TempDir(), "projects")
+	offsets := filepath.Join(t.TempDir(), "offsets.json")
+	s := state.NewStore(0, nil)
+	tw := NewTranscriptWatcherWithPaths(s, projects, offsets)
+
+	writeTranscript(t, projects, "proj", "sess-1", strings.Join([]string{
+		// Mid-turn narration: text block, but stop_reason says tool_use follows.
+		`{"type":"assistant","message":{"id":"msg_a","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Let me check the build first."}]}}`,
+		// A tool_use record in the same message.
+		`{"type":"assistant","message":{"id":"msg_a","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"go test ./..."}}]}}`,
+		// Thinking-only end_turn chunk of a final answer whose text block
+		// never arrived in this transcript (interrupted session).
+		`{"type":"assistant","message":{"id":"msg_c","role":"assistant","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"so the answer is…"}]}}`,
+	}, "\n")+"\n")
+
+	tw.scan()
+
+	sess := sessionState(t, s, "sess-1")
+	if sess == nil {
+		t.Fatal("session sess-1 not created by watcher scan")
+	}
+	if sess.Status != models.StatusActive {
+		t.Fatalf("status after mid-turn records = %q, want %q (no Stop may be synthesized)", sess.Status, models.StatusActive)
+	}
+	if sess.LastCompletedAt != nil {
+		t.Fatalf("LastCompletedAt = %v after mid-turn records, want nil", sess.LastCompletedAt)
+	}
+	if got := len(s.GetSnapshot().Notifications); got != 0 {
+		t.Fatalf("notifications = %d, want 0 (no completion from mid-turn records): %+v", got, s.GetSnapshot().Notifications)
 	}
 }
 

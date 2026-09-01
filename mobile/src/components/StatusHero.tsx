@@ -1,15 +1,18 @@
 import React from 'react';
 import { Session } from '../types';
-import { FolderGit2, Clock, Sparkles, Terminal, ShieldAlert } from 'lucide-react';
+import { FolderGit2, Clock, Sparkles, Terminal, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import ColorIcon from '../assets/claudecode-color.svg';
 import MonoIcon from '../assets/claudecode.svg';
 
 interface StatusHeroProps {
   session?: Session;
   isWorking: boolean;
+  // M9: true when the session went idle on a VERIFIED turn-end
+  // (last_completed_at set, no new turn started since).
+  taskCompleted: boolean;
 }
 
-export const StatusHero: React.FC<StatusHeroProps> = ({ session, isWorking }) => {
+export const StatusHero: React.FC<StatusHeroProps> = ({ session, isWorking, taskCompleted }) => {
   const getStatusBadge = () => {
     if (!session) {
       return {
@@ -45,6 +48,14 @@ export const StatusHero: React.FC<StatusHeroProps> = ({ session, isWorking }) =>
           icon: null,
         };
       default:
+        // M9: idle on a verified turn-end is a COMPLETION, not "just idling".
+        if (taskCompleted) {
+          return {
+            text: 'TASK COMPLETED',
+            color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.25)]',
+            icon: <CheckCircle2 size={13} className="text-emerald-400" />,
+          };
+        }
         return {
           text: 'IDLING',
           color: 'bg-slate-800/80 text-slate-400 border-slate-700/60',
@@ -96,6 +107,17 @@ export const StatusHero: React.FC<StatusHeroProps> = ({ session, isWorking }) =>
         {badge.icon}
         <span>{badge.text}</span>
       </div>
+
+      {/* M9: completion timestamp — when the finished turn completed */}
+      {taskCompleted && session?.last_completed_at && (
+        <div className="text-[11px] text-emerald-400/70 font-mono -mt-2 mb-3">
+          Finished at{' '}
+          {new Date(session.last_completed_at).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </div>
+      )}
 
       {/* Current Tool Activity Description */}
       <h2 className="text-xl font-extrabold text-white tracking-tight leading-snug max-w-sm mb-2 break-words">

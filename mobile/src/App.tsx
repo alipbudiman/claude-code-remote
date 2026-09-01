@@ -129,6 +129,12 @@ export const App: React.FC = () => {
   const isWaitingInput =
     activeSession?.status === 'waiting_permission' || activeSession?.pending_question !== undefined;
 
+  // M9: explicit completion display — a session that completed at some point
+  // (verified turn-end stamped last_completed_at) and hasn't started a new
+  // turn (a new turn clears the marker server-side and flips status active).
+  const taskCompleted =
+    activeSession?.status === 'idle' && !!activeSession?.last_completed_at;
+
   // Sync with persistent ongoing Android notification bar
   useEffect(() => {
     const subCount = Object.keys(activeSession?.active_subagents || {}).length;
@@ -208,7 +214,7 @@ export const App: React.FC = () => {
         )}
 
         {/* 1. Status Hero Monitor with Color/Mono SVG Icons */}
-        <StatusHero session={activeSession} isWorking={isWorking} />
+        <StatusHero session={activeSession} isWorking={isWorking} taskCompleted={taskCompleted} />
 
         {/* 2. Chrome Remote Desktop Quick Launcher (Above Sub-Agents) */}
         <ChromeRemoteButton isWaitingInput={isWaitingInput} />
@@ -227,6 +233,7 @@ export const App: React.FC = () => {
       <LiveStreamBar
         session={activeSession}
         isWorking={isWorking}
+        taskCompleted={taskCompleted}
       />
 
       {/* Settings Modal */}

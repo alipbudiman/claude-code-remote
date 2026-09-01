@@ -36,6 +36,9 @@ export interface Session {
   transcript_path: string;
   start_time: string;
   last_activity: string;
+  // M9: stamped by a verified turn-end (real or watcher-synthesized Stop).
+  // idle + set = the task completed and no new turn has started.
+  last_completed_at?: string;
   lines_processed: number;
   recent_logs: string[];
 }
