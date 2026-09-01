@@ -36,7 +36,7 @@
 
     body {
       background-color: var(--bg);
-      background-image: 
+      background-image:
         radial-gradient(circle at 15% 15%, rgba(217, 119, 87, 0.08) 0%, transparent 40%),
         radial-gradient(circle at 85% 85%, rgba(16, 185, 129, 0.05) 0%, transparent 40%),
         radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.6) 0%, transparent 100%);
@@ -122,6 +122,29 @@
       background: var(--accent);
       box-shadow: 0 0 10px var(--accent);
       animation: pulse 1.5s infinite;
+    }
+
+    .status-pill.waiting {
+      border-color: rgba(245, 158, 11, 0.4);
+      background: var(--warning-glow);
+      color: #fbbf24;
+    }
+
+    .status-pill.waiting .status-dot {
+      background: var(--warning);
+      box-shadow: 0 0 10px var(--warning);
+      animation: pulse 1.5s infinite;
+    }
+
+    .status-pill.completed {
+      border-color: rgba(16, 185, 129, 0.4);
+      background: var(--success-glow);
+      color: #34d399;
+    }
+
+    .status-pill.completed .status-dot {
+      background: var(--success);
+      box-shadow: 0 0 10px var(--success);
     }
 
     .status-pill.idle {
@@ -217,6 +240,12 @@
       animation: workingGlow 2.5s infinite alternate;
     }
 
+    .hero-icon-container.completed {
+      background: var(--success-glow);
+      border-color: rgba(16, 185, 129, 0.5);
+      box-shadow: 0 0 30px rgba(16, 185, 129, 0.3);
+    }
+
     @keyframes workingGlow {
       from { box-shadow: 0 0 20px rgba(217, 119, 87, 0.2); }
       to { box-shadow: 0 0 45px rgba(217, 119, 87, 0.45); }
@@ -244,6 +273,18 @@
       border: 1px solid rgba(217, 119, 87, 0.4);
     }
 
+    .hero-status-tag.waiting {
+      background: var(--warning-glow);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+
+    .hero-status-tag.completed {
+      background: var(--success-glow);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+
     .hero-status-tag.idle {
       background: rgba(100, 116, 139, 0.15);
       color: #94a3b8;
@@ -266,6 +307,25 @@
       align-items: center;
       gap: 0.4rem;
       font-family: var(--font-mono);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .hero-finished-at {
+      font-size: 0.8rem;
+      color: var(--success);
+      margin-top: 0.4rem;
+    }
+
+    .pending-question {
+      margin-top: 0.75rem;
+      width: 100%;
+      background: rgba(245, 158, 11, 0.08);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 12px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      color: #fbbf24;
     }
 
     /* Sub-Agent Section */
@@ -386,6 +446,77 @@
       gap: 1.5rem;
     }
 
+    /* Connection card: copy rows */
+    .copy-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      width: 100%;
+    }
+
+    .copy-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 0.55rem 0.75rem;
+    }
+
+    .copy-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      width: 3.4rem;
+    }
+
+    .copy-value {
+      flex: 1;
+      min-width: 0;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .copy-btn {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .copy-btn:hover {
+      background: rgba(217, 119, 87, 0.15);
+      border-color: rgba(217, 119, 87, 0.4);
+      color: #ffaa88;
+    }
+
+    .copy-btn.copied {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(16, 185, 129, 0.4);
+      color: var(--success);
+    }
+
+    .copy-btn svg {
+      width: 15px;
+      height: 15px;
+    }
+
     .qr-box {
       display: flex;
       flex-direction: column;
@@ -403,22 +534,9 @@
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     }
 
-    .ip-badge {
-      display: inline-block;
-      font-family: var(--font-mono);
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: var(--accent);
-      background: rgba(217, 119, 87, 0.1);
-      border: 1px solid rgba(217, 119, 87, 0.25);
-      padding: 0.35rem 0.75rem;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .ip-badge:hover {
-      background: rgba(217, 119, 87, 0.2);
+    .hint {
+      font-size: 0.75rem;
+      color: var(--text-dim);
     }
 
     .btn {
@@ -459,6 +577,22 @@
       background: rgba(255, 255, 255, 0.05);
       border-color: rgba(255, 255, 255, 0.2);
     }
+
+    .token-input {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      padding: 0.65rem 0.75rem;
+      outline: none;
+    }
+
+    .token-input:focus {
+      border-color: rgba(217, 119, 87, 0.5);
+    }
   </style>
 </head>
 <body>
@@ -470,31 +604,33 @@
       </div>
       <div>
         <h1>Claude Code Remote</h1>
-        <div style="font-size: 0.75rem; color: var(--text-dim);">Local LAN Monitor</div>
+        <div style="font-size: 0.75rem; color: var(--text-dim);">Local Monitor</div>
       </div>
     </div>
     <div class="status-pill idle" id="mainStatusPill">
       <div class="status-dot"></div>
-      <span id="mainStatusText">IDLING</span>
+      <span id="mainStatusText">CONNECTING</span>
     </div>
   </header>
 
   <main>
     <div style="display: flex; flex-direction: column; gap: 1.5rem;">
-      
+
       <!-- Live Hero Monitor -->
       <div class="card hero-monitor">
         <div class="hero-icon-container" id="heroIconContainer">
           <div id="heroIcon">
-            <!-- Dynamic SVG (claudecode-color.svg or claudecode.svg) -->
+            <!-- Dynamic SVG (working = colored, idle = monochrome) -->
           </div>
         </div>
-        <div class="hero-status-tag idle" id="heroStatusTag">IDLING</div>
-        <div class="hero-tool-desc" id="heroToolDesc">Ready for next prompt</div>
+        <div class="hero-status-tag idle" id="heroStatusTag">CONNECTING</div>
+        <div class="hero-tool-desc" id="heroToolDesc">Connecting to server…</div>
         <div class="hero-project-name" id="heroProject">
           <span style="color: var(--text-dim);">📁</span>
-          <span id="heroProjectName">No active session</span>
+          <span id="heroProjectName">—</span>
         </div>
+        <div class="hero-finished-at" id="heroFinishedAt" style="display:none;"></div>
+        <div class="pending-question" id="pendingQuestion" style="display:none;"></div>
       </div>
 
       <!-- Sub-Agent Inspector -->
@@ -519,7 +655,7 @@
         <div class="log-list" id="logList">
           <div class="log-item">
             <span class="log-time">[Ready]</span>
-            <span>Server listening on 0.0.0.0. Waiting for Claude Code hook events...</span>
+            <span>Waiting for server connection…</span>
           </div>
         </div>
       </div>
@@ -528,22 +664,48 @@
 
     <!-- Sidebar Info -->
     <div class="sidebar">
-      
-      <!-- Connect Mobile (QR & IP) -->
+
+      <!-- Connection details: copyable URL + token -->
+      <div class="card" style="display:flex; flex-direction:column; gap:0.75rem;">
+        <div class="card-title" style="margin-bottom:0;">
+          <span>🔗</span> Connection
+        </div>
+        <div class="copy-list" id="copyList">
+          <div class="copy-row">
+            <span class="copy-label">URL</span>
+            <span class="copy-value" id="copyUrlValue">…</span>
+            <button type="button" class="copy-btn" id="copyUrlBtn" title="Copy server URL">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+          </div>
+          <div class="copy-row">
+            <span class="copy-label">Token</span>
+            <span class="copy-value" id="copyTokenValue">…</span>
+            <button type="button" class="copy-btn" id="copyTokenBtn" title="Copy access token">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+          </div>
+        </div>
+        <div id="tokenSetup" style="display:none; flex-direction:column; gap:0.5rem;">
+          <p class="hint">No access token found. Paste the token from
+            <span style="font-family:var(--font-mono);">%USERPROFILE%\.claude\claude-remote-token</span>
+            on this PC:</p>
+          <input class="token-input" id="tokenInput" type="text" placeholder="64-character token" spellcheck="false" autocomplete="off">
+          <button type="button" class="btn btn-primary" id="tokenSaveBtn">Save token</button>
+        </div>
+        <p class="hint">Use these in the Android app — or scan the QR below from the same Wi-Fi.</p>
+      </div>
+
+      <!-- Connect Mobile (QR) -->
       <div class="card qr-box">
         <div class="card-title" style="align-self: flex-start;">
-          <span>📱</span> Android APK Connect
+          <span>📱</span> Android App Connect
         </div>
         <p style="font-size: 0.8rem; color: var(--text-muted);">
-          Scan QR from Android APK or open URL in your phone browser:
+          Scan this QR from the Android app (Scan QR), or open the URL in a phone browser:
         </p>
-        <img class="qr-image" id="qrCodeImg" src="/api/qr" alt="Connection QR Code">
-        <div class="ip-badge" id="primaryIpBadge" title="Click to copy">
-          http://127.0.0.1:9280
-        </div>
-        <p style="font-size: 0.75rem; color: var(--text-dim);">
-          Must be connected to the same Wi-Fi / LAN
-        </p>
+        <img class="qr-image" id="qrCodeImg" alt="Connection QR Code">
+        <p class="hint">Phone and PC must be on the same Wi-Fi / LAN</p>
       </div>
 
       <!-- GitHub APK Download -->
@@ -552,7 +714,7 @@
           <span>📦</span> Android APK Build
         </div>
         <p style="font-size: 0.8rem; color: var(--text-muted);">
-          Download the latest compiled APK directly from your GitHub repository:
+          Download the latest compiled APK directly from the GitHub repository:
         </p>
         <a href="https://github.com/alipbudiman/claude-code-remote/releases" target="_blank" class="btn btn-primary">
           📥 Download APK Release
@@ -569,6 +731,27 @@
     // Embedded SVGs matching icon/claudecode-color.svg and icon/claudecode.svg
     const SVG_COLOR = `<svg height="100%" style="flex:none;line-height:1" viewBox="0 0 24 24" width="100%" xmlns="http://www.w3.org/2000/svg"><title>Claude Code</title><path clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" fill="#D97757" fill-rule="evenodd"></path></svg>`;
     const SVG_MONO = `<svg fill="#64748b" fill-rule="evenodd" height="100%" style="flex:none;line-height:1" viewBox="0 0 24 24" width="100%" xmlns="http://www.w3.org/2000/svg"><title>Claude Code</title><path clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"></path></svg>`;
+    const SVG_CHECK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+
+    // ------------------------------------------------------------------
+    // Token handling: every request is token-gated (server auth since M0).
+    // The token arrives via ?token= (the URL the server prints/QR encodes)
+    // and is persisted in localStorage. Without it, an input is shown.
+    // ------------------------------------------------------------------
+    const TOKEN_KEY = 'claude_server_token';
+    const params = new URLSearchParams(window.location.search);
+    const queryToken = (params.get('token') || '').trim();
+    if (queryToken) {
+      localStorage.setItem(TOKEN_KEY, queryToken);
+      params.delete('token');
+      const clean = params.toString()
+        ? `${window.location.pathname}?${params.toString()}`
+        : window.location.pathname;
+      window.history.replaceState({}, document.title, clean);
+    }
+    let token = (localStorage.getItem(TOKEN_KEY) || '').trim();
+
+    const serverUrl = `${window.location.protocol}//${window.location.host}`;
 
     // Elements
     const headerIcon = document.getElementById('headerIcon');
@@ -579,67 +762,113 @@
     const heroStatusTag = document.getElementById('heroStatusTag');
     const heroToolDesc = document.getElementById('heroToolDesc');
     const heroProjectName = document.getElementById('heroProjectName');
+    const heroFinishedAt = document.getElementById('heroFinishedAt');
+    const pendingQuestion = document.getElementById('pendingQuestion');
     const subagentContainer = document.getElementById('subagentContainer');
     const subagentCount = document.getElementById('subagentCount');
     const logList = document.getElementById('logList');
-    const primaryIpBadge = document.getElementById('primaryIpBadge');
+    const copyUrlValue = document.getElementById('copyUrlValue');
+    const copyTokenValue = document.getElementById('copyTokenValue');
+    const qrCodeImg = document.getElementById('qrCodeImg');
 
-    let currentWorkingState = false;
-
-    function renderStatus(isWorking, toolDesc, projectName) {
-      currentWorkingState = isWorking;
-      if (isWorking) {
-        headerIcon.innerHTML = SVG_COLOR;
-        heroIcon.innerHTML = SVG_COLOR;
-        heroIconContainer.className = 'hero-icon-container working';
-        mainStatusPill.className = 'status-pill active';
-        mainStatusText.innerText = 'WORKING';
-        heroStatusTag.className = 'hero-status-tag working';
-        heroStatusTag.innerText = 'WORKING ON TASK';
-      } else {
-        headerIcon.innerHTML = SVG_MONO;
-        heroIcon.innerHTML = SVG_MONO;
-        heroIconContainer.className = 'hero-icon-container';
-        mainStatusPill.className = 'status-pill idle';
-        mainStatusText.innerText = 'IDLING';
-        heroStatusTag.className = 'hero-status-tag idle';
-        heroStatusTag.innerText = 'IDLING';
-      }
-
-      if (toolDesc) heroToolDesc.innerText = toolDesc;
-      if (projectName) heroProjectName.innerText = projectName;
+    // Connection card values + copy buttons
+    copyUrlValue.textContent = serverUrl;
+    copyTokenValue.textContent = token ? token : '—';
+    if (!token) {
+      const setup = document.getElementById('tokenSetup');
+      setup.style.display = 'flex';
     }
 
-    // Initialize Default State
-    renderStatus(false, 'Waiting for Claude Code task...', 'Local Server Ready');
+    function copyWithFeedback(button, text) {
+      const done = () => {
+        const original = button.innerHTML;
+        button.innerHTML = SVG_CHECK;
+        button.classList.add('copied');
+        setTimeout(() => { button.innerHTML = original; button.classList.remove('copied'); }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+      } else {
+        fallbackCopy(text, done);
+      }
+    }
 
-    // Render Subagents
+    function fallbackCopy(text, done) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { /* ignore */ }
+      document.body.removeChild(ta);
+    }
+
+    document.getElementById('copyUrlBtn').addEventListener('click', () => copyWithFeedback(document.getElementById('copyUrlBtn'), serverUrl));
+    document.getElementById('copyTokenBtn').addEventListener('click', () => {
+      if (token) copyWithFeedback(document.getElementById('copyTokenBtn'), token);
+    });
+
+    document.getElementById('tokenSaveBtn').addEventListener('click', () => {
+      const v = document.getElementById('tokenInput').value.trim();
+      if (v.length !== 64) { alert('Token must be exactly 64 characters.'); return; }
+      localStorage.setItem(TOKEN_KEY, v);
+      window.location.reload();
+    });
+
+    // ------------------------------------------------------------------
+    // Status rendering: working / waiting input / completed / idle
+    // ------------------------------------------------------------------
+    function fmtTime(iso) {
+      try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+      catch (e) { return ''; }
+    }
+
+    function renderState(kind, toolDesc, projectName, finishedAt) {
+      // kind: 'working' | 'waiting' | 'completed' | 'idle'
+      const colored = kind === 'working' || kind === 'waiting';
+      headerIcon.innerHTML = colored ? SVG_COLOR : SVG_MONO;
+      heroIcon.innerHTML = colored ? SVG_COLOR : SVG_MONO;
+      heroIconContainer.className = 'hero-icon-container' + (kind === 'working' ? ' working' : kind === 'completed' ? ' completed' : '');
+      mainStatusPill.className = 'status-pill ' + (kind === 'working' ? 'active' : kind === 'waiting' ? 'waiting' : kind === 'completed' ? 'completed' : 'idle');
+      mainStatusText.innerText = kind === 'working' ? 'WORKING' : kind === 'waiting' ? 'NEEDS INPUT' : kind === 'completed' ? 'COMPLETED' : 'IDLING';
+      heroStatusTag.className = 'hero-status-tag ' + (kind === 'idle' ? 'idle' : kind);
+      heroStatusTag.innerText = kind === 'working' ? 'WORKING ON TASK' : kind === 'waiting' ? 'WAITING FOR INPUT' : kind === 'completed' ? 'TASK COMPLETED' : 'IDLING';
+      if (toolDesc) heroToolDesc.innerText = toolDesc;
+      if (projectName) heroProjectName.innerText = projectName;
+      if (kind === 'completed' && finishedAt) {
+        heroFinishedAt.style.display = 'block';
+        heroFinishedAt.innerText = `Finished at ${fmtTime(finishedAt)}`;
+      } else {
+        heroFinishedAt.style.display = 'none';
+      }
+    }
+
+    renderState('idle', 'Waiting for Claude Code task…', '—');
+
     function renderSubagents(subagentsMap) {
       const subs = Object.values(subagentsMap || {});
       subagentCount.innerText = subs.length;
-
       if (subs.length === 0) {
         subagentContainer.innerHTML = `<div class="empty-state">No sub-agents currently running</div>`;
         return;
       }
-
       subagentContainer.innerHTML = `
         <div class="subagent-grid">
           ${subs.map(sub => `
             <div class="subagent-card">
               <div class="subagent-header">
-                <span class="subagent-role">${sub.agent_type || 'Sub-Agent'}</span>
+                <span class="subagent-role">${sub.agent_type || sub.role || 'Sub-Agent'}</span>
                 <span class="subagent-badge">${sub.status || 'running'}</span>
               </div>
               <div class="subagent-activity">${sub.current_tool_status || sub.description || 'Active'}</div>
-              <div class="subagent-time">Started: ${new Date(sub.started_at).toLocaleTimeString()}</div>
+              <div class="subagent-time">Started: ${sub.started_at ? new Date(sub.started_at).toLocaleTimeString() : '—'}</div>
             </div>
           `).join('')}
         </div>
       `;
     }
 
-    // Append Log
     function appendLogItem(time, message) {
       const item = document.createElement('div');
       item.className = 'log-item';
@@ -650,82 +879,89 @@
       }
     }
 
-    // Connect WebSocket
+    function handleSessionUpdate(sess) {
+      if (!sess) return;
+      let kind = 'idle';
+      if (sess.status === 'active' || sess.status === 'subagent_running') kind = 'working';
+      else if (sess.status === 'waiting_permission') kind = 'waiting';
+      else if (sess.status === 'idle' && sess.last_completed_at) kind = 'completed';
+
+      renderState(kind, sess.current_tool_status, sess.project_name || sess.project_dir || '—', sess.last_completed_at);
+      renderSubagents(sess.active_subagents);
+
+      const q = sess.pending_question;
+      if (q && !q.stale) {
+        pendingQuestion.style.display = 'block';
+        pendingQuestion.innerText = `❓ ${q.title || q.question || 'Claude is waiting for your input'}`;
+      } else {
+        pendingQuestion.style.display = 'none';
+      }
+    }
+
+    function handleInitialState(state) {
+      if (state.active_session) handleSessionUpdate(state.active_session);
+      if (state.notifications && state.notifications.length > 0) {
+        logList.innerHTML = '';
+        state.notifications.slice().reverse().forEach(n => {
+          appendLogItem(fmtTime(n.timestamp), `${n.title}: ${n.body}`);
+        });
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // WebSocket: authenticates with the claude-remote.<token> subprotocol
+    // (browsers cannot set headers on a WS handshake). Reconnects forever.
+    // ------------------------------------------------------------------
     function initWebSocket() {
+      if (!token) {
+        renderState('idle', 'Access token required — enter it on the right.', '—');
+        return;
+      }
       const loc = window.location;
       const wsUri = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/ws';
-      const ws = new WebSocket(wsUri);
+      let ws;
+      try {
+        ws = new WebSocket(wsUri, ['claude-remote.' + token]);
+      } catch (e) {
+        setTimeout(initWebSocket, 2500);
+        return;
+      }
 
-      ws.onopen = () => {
-        console.log('[Remote Monitor] Connected to WebSocket');
-      };
+      ws.onopen = () => appendLogItem(fmtTime(new Date().toISOString()), 'Connected to server');
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'initial_state') {
-            handleInitialState(msg.data);
-          } else if (msg.type === 'session_update') {
-            handleSessionUpdate(msg.data);
-          } else if (msg.type === 'subagent_update') {
-            // Updated subagent
-          } else if (msg.type === 'notification') {
+          if (msg.type === 'initial_state') handleInitialState(msg.data);
+          else if (msg.type === 'session_update') handleSessionUpdate(msg.data);
+          else if (msg.type === 'notification') {
             const notif = msg.data;
-            appendLogItem(new Date(notif.timestamp).toLocaleTimeString(), `${notif.title}: ${notif.body}`);
-            // Browser Notification API
-            if (Notification.permission === 'granted') {
+            appendLogItem(fmtTime(notif.timestamp), `${notif.title}: ${notif.body}`);
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(notif.title, { body: notif.body });
             }
           }
+          // 'stats' (heartbeat) and 'room_status' (relay) keep the link warm — nothing to render.
         } catch (e) {
           console.error(e);
         }
       };
 
       ws.onclose = () => {
-        console.log('[Remote Monitor] WebSocket closed. Retrying in 2s...');
-        setTimeout(initWebSocket, 2000);
+        appendLogItem(fmtTime(new Date().toISOString()), 'Connection lost — retrying…');
+        setTimeout(initWebSocket, 2500);
       };
     }
 
-    function handleInitialState(state) {
-      if (state.host_ips && state.host_ips.length > 0) {
-        const ip = state.host_ips[0];
-        primaryIpBadge.innerText = `http://${ip}:${state.port}`;
-      }
-
-      if (state.active_session) {
-        handleSessionUpdate(state.active_session);
-      }
-
-      if (state.notifications && state.notifications.length > 0) {
-        logList.innerHTML = '';
-        state.notifications.forEach(n => {
-          appendLogItem(new Date(n.timestamp).toLocaleTimeString(), `${n.title}: ${n.body}`);
-        });
-      }
+    // QR endpoint is token-gated too — append the token as a query param.
+    if (token) {
+      qrCodeImg.src = '/api/qr?token=' + encodeURIComponent(token);
     }
 
-    function handleSessionUpdate(sess) {
-      const isWorking = (sess.status === 'active' || sess.status === 'subagent_running' || sess.status === 'waiting_permission');
-      renderStatus(isWorking, sess.current_tool_status, sess.project_name || sess.project_dir);
-      renderSubagents(sess.active_subagents);
-    }
-
-    // Request Notification permission
+    // Browser notifications on first click (optional convenience)
     if ('Notification' in window && Notification.permission === 'default') {
-      document.body.addEventListener('click', () => {
-        Notification.requestPermission();
-      }, { once: true });
+      document.body.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
     }
-
-    // Copy IP on badge click
-    primaryIpBadge.addEventListener('click', () => {
-      navigator.clipboard.writeText(primaryIpBadge.innerText);
-      const prev = primaryIpBadge.innerText;
-      primaryIpBadge.innerText = 'Copied to clipboard!';
-      setTimeout(() => { primaryIpBadge.innerText = prev; }, 1500);
-    });
 
     initWebSocket();
   </script>
