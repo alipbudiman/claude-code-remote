@@ -86,17 +86,15 @@ func waitFor(t *testing.T, desc string, cond func() bool) {
 func TestRelayForwardsFramesWithinRoom(t *testing.T) {
 	_, ts := newTestRelay(t)
 
+	// Join A and consume its room_status BEFORE dialing B. The two joins are
+	// served by independent handler goroutines, so on their own they have NO
+	// ordering guarantee; when join(B) happened to register first, A's first
+	// frame was peer_joined instead of room_status (the historical flake).
+	// Consuming A's room_status — sent only to the joiner of an EMPTY room —
+	// proves A's registration completed first, which pins the rest of the
+	// test: B necessarily joins an occupied room, so B gets no room_status
+	// and A's next frame is exactly the peer_joined announcement below.
 	a := wsDial(t, ts, tokenA, false) // token via ?token=
-	b := wsDial(t, ts, tokenA, true)  // token via subprotocol
-
-	// The subprotocol member must have the handshake echoed back (browser
-	// clients fail the upgrade without it).
-	if got := b.Subprotocol(); got != "claude-remote."+tokenA {
-		t.Fatalf("negotiated subprotocol = %q, want %q", got, "claude-remote."+tokenA)
-	}
-	if got := a.Subprotocol(); got != "" {
-		t.Fatalf("query-token member negotiated subprotocol %q, want none", got)
-	}
 
 	// A joined an EMPTY room: the relay must tell A immediately (room_status,
 	// peers 0) so a phone alone in the room does not see a silent blank app.
@@ -107,6 +105,17 @@ func TestRelayForwardsFramesWithinRoom(t *testing.T) {
 	}
 	if peers := status["data"].(map[string]interface{})["peers"]; peers != float64(0) {
 		t.Fatalf("room_status peers = %v, want 0", peers)
+	}
+
+	b := wsDial(t, ts, tokenA, true) // token via subprotocol
+
+	// The subprotocol member must have the handshake echoed back (browser
+	// clients fail the upgrade without it).
+	if got := b.Subprotocol(); got != "claude-remote."+tokenA {
+		t.Fatalf("negotiated subprotocol = %q, want %q", got, "claude-remote."+tokenA)
+	}
+	if got := a.Subprotocol(); got != "" {
+		t.Fatalf("query-token member negotiated subprotocol %q, want none", got)
 	}
 
 	// B's join announced a peer to A: consume it next.
