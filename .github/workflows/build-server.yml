@@ -61,3 +61,39 @@ jobs:
           files: bin/${{ matrix.output }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # M7: publish the root Dockerfile (the cmd/relay hub) as a PUBLIC ghcr.io
+  # image so the Railway template can reference a Docker-image source instead
+  # of this GitHub repo — repo-source templates show "Trying to access GitHub
+  # repository" (Deploy disabled) for anyone but the owner.
+  publish-relay-image:
+    name: Publish relay image to GHCR
+    runs-on: ubuntu-latest
+    # Push triggers only (main/master branch pushes + v* tags): publishing
+    # needs packages-write GITHUB_TOKEN, which pull_request events lack.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push relay image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # :latest always; :main (or :master) on branch pushes; :vX.Y.Z on
+          # tag pushes (github.ref_name carries both cases).
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/claude-remote-relay:latest
+            ghcr.io/${{ github.repository_owner }}/claude-remote-relay:${{ github.ref_name }}

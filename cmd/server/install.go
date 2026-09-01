@@ -20,11 +20,19 @@ const defaultInstallLogFile = `%USERPROFILE%\.claude\claude-remote-server.log`
 // installTaskArgs builds the exact schtasks argv registering the logon
 // Scheduled Task. The /TR value embeds its own quoting (exe path and log path
 // may contain spaces), which Go's exec passes through as one escaped argument.
-func installTaskArgs(exePath string, port int, logFile string) []string {
+// A non-empty relayURL is appended as --relay so the autostarted server keeps
+// its off-LAN relay connection across reboots (M7) — without it every reboot
+// silently downgraded the server to LAN-only.
+func installTaskArgs(exePath string, port int, logFile, relayURL string) []string {
+	tr := fmt.Sprintf(`"%s" -port %d -log-file "%s"`, exePath, port, logFile)
+	if relayURL != "" {
+		// Unquoted like -port: a URL can never contain a literal space.
+		tr += fmt.Sprintf(" --relay %s", relayURL)
+	}
 	return []string{
 		"/Create",
 		"/TN", taskName,
-		"/TR", fmt.Sprintf(`"%s" -port %d -log-file "%s"`, exePath, port, logFile),
+		"/TR", tr,
 		"/SC", "ONLOGON",
 		"/RL", "LIMITED",
 		"/F",
@@ -40,8 +48,9 @@ func uninstallTaskArgs() []string {
 // installScheduledTask registers the logon Scheduled Task pointing at this
 // exe. "Survives reboot" here means "starts at the user's logon": Claude Code
 // (the event source) runs in the user session, so a SYSTEM service would buy
-// nothing over a logon-triggered task.
-func installScheduledTask(port int) error {
+// nothing over a logon-triggered task. A non-empty relayURL (from -relay or
+// RELAY_URL) is baked into the task command so the relay survives reboots too.
+func installScheduledTask(port int, relayURL string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("could not resolve the exe path: %w", err)
@@ -50,7 +59,7 @@ func installScheduledTask(port int) error {
 		return fmt.Errorf("could not make the exe path absolute: %w", err)
 	}
 
-	args := installTaskArgs(exe, port, defaultInstallLogFile)
+	args := installTaskArgs(exe, port, defaultInstallLogFile, relayURL)
 	out, err := exec.Command("schtasks", args...).CombinedOutput()
 	if err != nil {
 		blob := strings.ToLower(string(out) + " " + err.Error())
@@ -65,6 +74,11 @@ func installScheduledTask(port int) error {
 
 	fmt.Printf("✅ Scheduled task \"%s\" registered — the server will start automatically at your logon\n", taskName)
 	fmt.Printf("   Exe: %s\n   Command: schtasks %s\n", exe, strings.Join(args, " "))
+	if relayURL != "" {
+		fmt.Printf("   Relay preserved across reboots: --relay %s\n", relayURL)
+	} else {
+		fmt.Printf("   Note: no --relay given — the autostarted server will be LAN-only (pass --relay wss://... or set RELAY_URL to keep the relay connection)\n")
+	}
 	fmt.Printf("   Remove it any time with: %s -uninstall\n", exe)
 	return nil
 }

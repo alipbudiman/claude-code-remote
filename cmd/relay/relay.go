@@ -180,6 +180,23 @@ type peerJoinedMsg struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// roomStatusData is the payload of room_status: how many OTHER members are in
+// the room right now.
+type roomStatusData struct {
+	Peers int `json:"peers"`
+}
+
+// roomStatusMsg is the relay-control frame telling a member it is ALONE: the
+// room had zero members when it joined (M7). Without it, a phone connecting
+// while the desktop server is down silently showed nothing — now the app can
+// render an explicit "waiting for your PC" banner. Same local-struct rule as
+// peerJoinedMsg: never reuse models.WebSocketMessage here.
+type roomStatusMsg struct {
+	Type      string         `json:"type"`
+	Data      roomStatusData `json:"data"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
 // relayPeer is one authenticated member connection. All writes funnel through
 // writeMu (gorilla allows one concurrent writer), each bounded by
 // wsWriteTimeout.
@@ -227,6 +244,16 @@ func (s *relayServer) join(p *relayPeer) {
 		for _, q := range others {
 			q.send(websocket.TextMessage, msg)
 		}
+	} else {
+		// M7: this joiner is ALONE — the room was empty, so no desktop server
+		// will push a snapshot until one arrives. Tell it immediately instead
+		// of leaving a phone staring at a silent blank app.
+		msg, _ := json.Marshal(roomStatusMsg{
+			Type:      "room_status",
+			Data:      roomStatusData{Peers: 0},
+			Timestamp: time.Now(),
+		})
+		p.send(websocket.TextMessage, msg)
 	}
 }
 

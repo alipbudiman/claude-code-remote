@@ -27,6 +27,10 @@ export const App: React.FC = () => {
   const [serverPort, setServerPort] = useState<number>(9280);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
+  // M7: true when the relay says we are ALONE in the room (peers 0) — the
+  // desktop server is not dialed in, so nothing will ever arrive. Cleared by
+  // any real data frame (initial_state / session_update / notification).
+  const [relayWaiting, setRelayWaiting] = useState<boolean>(false);
 
   useEffect(() => {
     // Check initial notification status
@@ -75,10 +79,12 @@ export const App: React.FC = () => {
   const handleWebSocketMessage = (msg: WebSocketMessage) => {
     switch (msg.type) {
       case 'initial_state':
+        setRelayWaiting(false);
         handleSnapshot(msg.data as ServerStateSnapshot);
         break;
 
       case 'session_update': {
+        setRelayWaiting(false);
         const sess = msg.data as Session;
         setActiveSession(sess);
         if (sess.recent_logs) {
@@ -88,6 +94,7 @@ export const App: React.FC = () => {
       }
 
       case 'notification': {
+        setRelayWaiting(false);
         const notif = msg.data as AppNotification;
         setNotifications((prev) => [notif, ...prev.slice(0, 49)]);
         // M4a: heads-up alerts inside the APK are owned by the native
@@ -100,6 +107,14 @@ export const App: React.FC = () => {
         }
         break;
       }
+
+      case 'room_status':
+        // M7: relay says how many OTHER members share the room. peers 0 means
+        // the desktop server has not dialed in — surface that instead of a
+        // silent blank screen. Any peers > 0 means the snapshot is imminent,
+        // so make sure no stale waiting banner lingers.
+        setRelayWaiting(msg.data?.peers === 0);
+        break;
     }
   };
 
@@ -170,6 +185,14 @@ export const App: React.FC = () => {
               <span>Set up your server — no desktop address saved yet</span>
             )}
             <span className="underline">{serverUrl ? 'Change IP' : 'Set up'}</span>
+          </div>
+        )}
+
+        {/* M7: Relay Presence Banner — connected to the relay but ALONE in the
+            room; clears as soon as the desktop server pushes real data. */}
+        {isConnected && relayWaiting && (
+          <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center">
+            <span>Connected to relay — waiting for your PC. Run the server with {'--relay <relay-url>'}.</span>
           </div>
         )}
 

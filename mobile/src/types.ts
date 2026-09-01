@@ -65,7 +65,7 @@ export interface ServerStateSnapshot {
 }
 
 export interface WebSocketMessage {
-  type: 'initial_state' | 'session_update' | 'subagent_update' | 'notification' | 'stats';
+  type: 'initial_state' | 'session_update' | 'subagent_update' | 'notification' | 'stats' | 'room_status';
   data: any;
   timestamp: string;
 }

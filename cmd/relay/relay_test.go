@@ -98,11 +98,22 @@ func TestRelayForwardsFramesWithinRoom(t *testing.T) {
 		t.Fatalf("query-token member negotiated subprotocol %q, want none", got)
 	}
 
-	// B's join announced a peer to A: consume it first.
+	// A joined an EMPTY room: the relay must tell A immediately (room_status,
+	// peers 0) so a phone alone in the room does not see a silent blank app.
 	_, data := readMsg(t, a)
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil || status["type"] != "room_status" {
+		t.Fatalf("A's first frame after joining an empty room = %q, want room_status", data)
+	}
+	if peers := status["data"].(map[string]interface{})["peers"]; peers != float64(0) {
+		t.Fatalf("room_status peers = %v, want 0", peers)
+	}
+
+	// B's join announced a peer to A: consume it next.
+	_, data = readMsg(t, a)
 	var join map[string]interface{}
 	if err := json.Unmarshal(data, &join); err != nil || join["type"] != "peer_joined" {
-		t.Fatalf("A's first frame after B joins = %q, want peer_joined", data)
+		t.Fatalf("A's next frame after B joins = %q, want peer_joined", data)
 	}
 
 	// Text frame A -> B, verbatim.
@@ -137,6 +148,15 @@ func TestRelayIsolatesDifferentTokenRooms(t *testing.T) {
 	// lifetime under this test's shrunken interval.)
 	waitFor(t, "two rooms registered", func() bool { return rs.roomCount() == 2 })
 
+	// Both joiners landed in EMPTY rooms (different tokens), so each got the
+	// M7 room_status frame on its own join — consume B's before the quiet
+	// window below, which asserts nothing further crosses room boundaries.
+	_, data := readMsg(t, b)
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil || status["type"] != "room_status" {
+		t.Fatalf("B's first frame after joining its empty room = %q, want room_status", data)
+	}
+
 	if err := a.WriteMessage(websocket.TextMessage, []byte("room-a-secret")); err != nil {
 		t.Fatalf("A write: %v", err)
 	}
@@ -154,14 +174,22 @@ func TestRelayIsolatesDifferentTokenRooms(t *testing.T) {
 }
 
 // 3. When B joins A's room, A is told via a peer_joined frame (the desktop
-// uses this to push a fresh snapshot).
+// uses this to push a fresh snapshot). A joining an EMPTY room instead gets a
+// room_status frame (M7) — covered fully by TestRelayRoomStatusEmptyRoom below;
+// here it just has to be consumed before the peer_joined announcement.
 func TestRelayPeerJoinedAnnouncement(t *testing.T) {
 	_, ts := newTestRelay(t)
 
 	a := wsDial(t, ts, tokenA, false)
+	_, data := readMsg(t, a)
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil || status["type"] != "room_status" {
+		t.Fatalf("A's first frame after joining an empty room = %q, want room_status", data)
+	}
+
 	_ = wsDial(t, ts, tokenA, true) // B joins; the announcement lands on A
 
-	_, data := readMsg(t, a)
+	_, data = readMsg(t, a)
 	var msg map[string]interface{}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatalf("peer_joined frame not JSON: %q: %v", data, err)
@@ -175,6 +203,55 @@ func TestRelayPeerJoinedAnnouncement(t *testing.T) {
 	// The control frame carries exactly type+timestamp — no data field.
 	if _, hasData := msg["data"]; hasData {
 		t.Fatalf("peer_joined frame must not carry a data field: %q", data)
+	}
+}
+
+// 3a. M7 presence feedback: the FIRST member of an empty room is told it is
+// alone (room_status, peers 0) — a phone connecting while the desktop is down
+// otherwise stares at a silent blank app. The SECOND member triggers no
+// room_status for anyone (the existing peer_joined -> snapshot flow covers it).
+func TestRelayRoomStatusEmptyRoom(t *testing.T) {
+	_, ts := newTestRelay(t)
+
+	// First joiner: empty room -> room_status with peers 0, timestamp set.
+	a := wsDial(t, ts, tokenA, false)
+	_, data := readMsg(t, a)
+	var msg map[string]interface{}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("room_status frame not JSON: %q: %v", data, err)
+	}
+	if msg["type"] != "room_status" {
+		t.Fatalf("first frame type = %v, want room_status", msg["type"])
+	}
+	dataObj, ok := msg["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("room_status frame has no data object: %q", data)
+	}
+	if dataObj["peers"] != float64(0) {
+		t.Fatalf("room_status data.peers = %v, want 0", dataObj["peers"])
+	}
+	if ts, ok := msg["timestamp"]; !ok || ts == nil {
+		t.Fatalf("room_status frame has no timestamp: %q", data)
+	}
+
+	// Second joiner: the room now has a member — A gets peer_joined (not
+	// room_status), and B gets NO room_status either.
+	b := wsDial(t, ts, tokenA, true)
+	_, data = readMsg(t, a)
+	var join map[string]interface{}
+	if err := json.Unmarshal(data, &join); err != nil || join["type"] != "peer_joined" {
+		t.Fatalf("A's frame after B joins = %q, want peer_joined", data)
+	}
+
+	// B must receive no data frame within a generous quiet window (the relay
+	// pings at 100ms, but control frames never surface from ReadMessage).
+	if err := b.SetReadDeadline(time.Now().Add(400 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, _, err := b.ReadMessage(); err == nil {
+		t.Fatal("B received a frame after joining an occupied room, want silence (no room_status)")
+	} else if !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Fatalf("B read error = %v, want deadline timeout", err)
 	}
 }
 

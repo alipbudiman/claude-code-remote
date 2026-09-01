@@ -56,7 +56,9 @@ func main() {
 
 	// Lifecycle-management flags never run the server.
 	if *installFlag {
-		if err := installScheduledTask(*portFlag); err != nil {
+		// *relayFlag already folds in RELAY_URL (flag default), so the
+		// registered task keeps the relay connection across reboots (M7).
+		if err := installScheduledTask(*portFlag, *relayFlag); err != nil {
 			log.Fatalf("Fatal: -install failed: %v", err)
 		}
 		return // exit 0

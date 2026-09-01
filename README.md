@@ -59,6 +59,13 @@ Jalankan server desktop dengan `claude-remote-server.exe -port 9280 --relay wss:
 
 Token = kunci room relay. Siapa pun yang memegang token bisa membaca stream status — **jangan dibagikan**. Rotasi token: hapus `~/.claude/claude-remote-token` lalu restart server (token baru otomatis dibuat), kemudian perbarui token di HP.
 
+### 5. Troubleshooting
+
+- **APK terhubung ke relay tapi tidak ada apa-apa** → PC belum masuk room: pastikan server dijalankan dengan `--relay wss://<domain>` dan log menampilkan `🌐 Relay client active`; setelah M7 versi baru, app juga menampilkan banner "waiting for your PC".
+- **Token salah** → handshake ditolak 401 secara senyap; salin utuh 64 karakter dari `%USERPROFILE%\.claude\claude-remote-token` (tanpa spasi/baris baru).
+- **QR tidak terhubung di HP** → cek IP di QR vs daftar alamat (jaringan virtual WSL/VPN bisa terpilih); pastikan HP dan PC satu Wi-Fi; buka port di firewall Windows:
+  `netsh advfirewall firewall add rule name="Claude Remote Server" dir=in action=allow protocol=TCP localport=9280`.
+
 ---
 
 ## Struktur Proyek
@@ -160,7 +167,9 @@ dibanding task yang dipicu login.
 ```cmd
 :: Dari terminal Administrator (registrasi task ONLOGON memerlukan elevasi;
 :: tanpa elevasi schtasks menjawab "Access is denied")
-bin\claude-remote-server.exe -install
+:: --relay (atau env RELAY_URL) ikut dipertahankan task yang didaftarkan —
+:: tanpa itu, setiap reboot otomatis turun ke mode LAN-only.
+bin\claude-remote-server.exe -install --relay wss://<domain-relay-anda>
 
 :: Verifikasi task terdaftar
 schtasks /Query /TN ClaudeRemoteServer
@@ -171,7 +180,9 @@ bin\claude-remote-server.exe -uninstall
 
 - `-install` mendaftarkan Scheduled Task `ClaudeRemoteServer` via `schtasks`
   (`/SC ONLOGON /RL LIMITED /F`) yang menjalankan:
-  `"<path-exe>" -port 9280 -log-file "%USERPROFILE%\.claude\claude-remote-server.log"`.
+  `"<path-exe>" -port 9280 -log-file "%USERPROFILE%\.claude\claude-remote-server.log"`
+  — plus `--relay <url>` bila flag `--relay` atau env `RELAY_URL` aktif saat
+  `-install` dijalankan, sehingga koneksi relay tetap hidup setelah reboot.
 - `-log-file` menyalin semua log diagnostik ke file tersebut (di samping
   stdout); file otomatis dirotasi ke `.1` bila melebihi 5MB.
 - Menutup jendela console (tombol X), logoff, dan shutdown memicu jalur

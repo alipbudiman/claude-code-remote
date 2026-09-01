@@ -440,6 +440,13 @@ class MonitoringService : Service() {
                 // Liveness only: onMessage already refreshed lastMessageAt.
                 // No notification update — never churn the shade every 20s.
             }
+            "room_status" -> {
+                // M7 relay presence: the relay sends this when we join an
+                // empty room (desktop server not dialed in). Liveness only,
+                // like "stats" — onMessage already refreshed lastMessageAt;
+                // the visible "waiting for your PC" banner is the WebView's
+                // job (App.tsx), not the shade's.
+            }
             else -> {
                 // "subagent_update", future types: the notification only
                 // needs session state, which session_update carries.
