@@ -308,7 +308,13 @@ class MainActivity : AppCompatActivity() {
                             CAMERA_PERMISSION_REQUEST_CODE
                         )
                     }
-                    .setNegativeButton("Not now") { dialog, _ -> dialog.dismiss() }
+                    .setNegativeButton("Not now") { dialog, _ ->
+                        dialog.dismiss()
+                        // Route the decline to the web layer so the scanner
+                        // overlay leaves its "waiting for permission" state
+                        // and shows the denial guidance instead.
+                        notifyCameraPermission(false)
+                    }
                     .show()
             }
         }
