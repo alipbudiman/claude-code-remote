@@ -1,4 +1,4 @@
-import { ServerStateSnapshot, WebSocketMessage } from '../types';
+import { DecisionRespondInput, ServerStateSnapshot, WebSocketMessage } from '../types';
 
 type MessageHandler = (msg: WebSocketMessage) => void;
 type ConnectionHandler = (connected: boolean) => void;
@@ -318,6 +318,34 @@ class WebSocketService {
   public onConnectionChange(handler: ConnectionHandler) {
     this.connectionHandlers.add(handler);
     return () => this.connectionHandlers.delete(handler);
+  }
+
+  // --- Client→server commands (2026-09-02) ---------------------------------
+  // The socket has been receive-only until now; these are the first sends.
+  // Commands ride /ws in BOTH LAN and relay mode — the relay forwards
+  // frames verbatim in both directions, while HTTP only reaches the
+  // desktop on LAN.
+
+  /** Send a raw frame if the socket is open. Returns false when closed. */
+  public send(frame: object): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(JSON.stringify(frame));
+    return true;
+  }
+
+  /** Send a client_command frame ({type, data:{op, ...extra}}). */
+  public sendCommand(op: string, extra: Record<string, unknown> = {}): boolean {
+    return this.send({ type: 'client_command', data: { op, ...extra }, timestamp: new Date().toISOString() });
+  }
+
+  /** Answer a pending decision (allow / deny / always_allow / answer / dismiss). */
+  public sendDecision(input: DecisionRespondInput): boolean {
+    return this.sendCommand('decision', input as unknown as Record<string, unknown>);
+  }
+
+  /** Queue a prompt for a session (delivered at the current turn's end). */
+  public sendPrompt(sessionId: string, text: string): boolean {
+    return this.sendCommand('prompt', { session_id: sessionId, text });
   }
 
   private notifyMessage(msg: WebSocketMessage) {
