@@ -10,6 +10,7 @@ import { LiveStreamBar } from './components/LiveStreamBar';
 import { BatteryBanner } from './components/BatteryBanner';
 import ProcessFeed from './components/ProcessFeed';
 import DecisionBanner from './components/DecisionBanner';
+import PromptComposer from './components/PromptComposer';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
 import { Session, AppNotification, PendingDecision, ProcessEvent, ServerStateSnapshot, WebSocketMessage } from './types';
@@ -275,6 +276,13 @@ export const App: React.FC = () => {
 
         {/* 2. Chrome Remote Desktop Quick Launcher (Above Sub-Agents) */}
         <ChromeRemoteButton isWaitingInput={isWaitingInput} />
+
+        {/* 2b. Remote Prompt Composer (mid-task prompt injection) */}
+        <PromptComposer
+          session={activeSession}
+          isWorking={isWorking}
+          onSend={(t) => wsService.sendPrompt(activeSession?.id ?? '', t)}
+        />
 
         {/* 3. Sub-Agent Live Inspector */}
         <SubagentInspector
