@@ -156,3 +156,44 @@ func FormatToolStatus(toolName string, input map[string]interface{}) string {
 		return fmt.Sprintf("Using %s", toolName)
 	}
 }
+
+// FormatToolDetail renders a tool call's full detail for the live process
+// view (multi-line, NOT length-capped here — the store caps it).
+func FormatToolDetail(toolName string, input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+	get := func(k string) string {
+		v, _ := input[k].(string)
+		return v
+	}
+	switch toolName {
+	case "Bash", "run_command", "PowerShell":
+		return get("command")
+	case "Edit", "EditFile", "replace_file_content", "Write", "WriteFile", "write_to_file", "Read", "ReadFile", "NotebookEdit":
+		fp := get("file_path")
+		if fp == "" {
+			fp = get("path")
+		}
+		parts := []string{fp}
+		if o, n := get("old_string"), get("new_string"); o != "" || n != "" {
+			parts = append(parts, "- "+o, "+ "+n)
+		}
+		if c := get("content"); c != "" {
+			parts = append(parts, c)
+		}
+		return strings.Join(parts, "\n")
+	case "Grep", "grep_search":
+		return "pattern: " + get("pattern") + "\npath: " + get("path")
+	case "Glob":
+		return get("pattern")
+	case "WebFetch":
+		return get("url") + "\n" + get("prompt")
+	case "WebSearch", "search_web":
+		return get("query")
+	case "Task", "Agent", "invoke_subagent":
+		return get("description") + "\n" + get("prompt")
+	default:
+		return get("command") + get("file_path") + get("url") + get("query")
+	}
+}

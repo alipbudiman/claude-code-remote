@@ -200,7 +200,12 @@ func (s *Store) AddNotification(sessionID, title, body, notifType string) *model
 func (s *Store) GetOrCreateSession(sessionID, projectDir, transcriptPath string) *models.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.getOrCreateSessionLocked(sessionID, projectDir, transcriptPath)
+}
 
+// getOrCreateSessionLocked is GetOrCreateSession for callers already holding
+// s.mu (e.g. AppendProcessEvent).
+func (s *Store) getOrCreateSessionLocked(sessionID, projectDir, transcriptPath string) *models.Session {
 	if sess, exists := s.sessions[sessionID]; exists {
 		if projectDir != "" && sess.ProjectDir == "" {
 			sess.ProjectDir = projectDir
@@ -343,6 +348,10 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 
 	var notifTitle, notifBody, notifType string
 
+	// feedEvt is appended to the live process feed after the lock is
+	// released (AppendProcessEvent broadcasts — never under s.mu).
+	var feedEvt *models.ProcessEvent
+
 	switch payload.HookEventName {
 	case "SessionStart":
 		sess.Status = models.StatusActive
@@ -363,6 +372,7 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		sess.LastCompletedAt = nil
 		sess.CurrentToolStatus = "Working on your prompt…"
 		appendLog("User prompt submitted")
+		feedEvt = &models.ProcessEvent{Kind: models.EventUserPrompt, Title: "You", Detail: payload.Prompt}
 
 	case "PreToolUse":
 		sess.TurnActive = true
@@ -374,6 +384,10 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 			sess.ActiveToolIDs[payload.ToolUseID] = statusDesc
 		}
 		appendLog(statusDesc)
+		feedEvt = &models.ProcessEvent{
+			Kind: models.EventToolUse, ToolName: payload.ToolName, ToolUseID: payload.ToolUseID,
+			Title: statusDesc, Detail: hooks.FormatToolDetail(payload.ToolName, payload.ToolInput),
+		}
 
 		// Check if tool is AskUserQuestion / ask_question
 		if payload.ToolName == "AskUserQuestion" || payload.ToolName == "ask_question" {
@@ -462,6 +476,17 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		}
 
 	case "PostToolUse", "PostToolUseFailure":
+		if payload.HookEventName == "PostToolUseFailure" {
+			feedEvt = &models.ProcessEvent{
+				Kind: models.EventToolError, ToolName: payload.ToolName, ToolUseID: payload.ToolUseID,
+				Title: "failed", Detail: payload.Reason,
+			}
+		} else {
+			feedEvt = &models.ProcessEvent{
+				Kind: models.EventToolResult, ToolName: payload.ToolName, ToolUseID: payload.ToolUseID,
+				Title: "completed", Detail: string(payload.ToolResponse),
+			}
+		}
 		if payload.ToolUseID != "" {
 			delete(sess.ActiveToolIDs, payload.ToolUseID)
 			// Same identity preference the subagent was keyed with.
@@ -615,6 +640,9 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 		sess.ActiveToolIDs = make(map[string]string)
 		sess.LastCompletedAt = &t
 		appendLog("Turn finished (task completed)")
+		feedEvt = &models.ProcessEvent{
+			Kind: models.EventTurnEnd, Title: "Turn finished", Detail: payload.LastAssistantMessage,
+		}
 		notifTitle = "✅ Task Completed"
 		notifBody = fmt.Sprintf("Claude Code finished working on %s and is ready for your next prompt.", sess.ProjectName)
 		notifType = "task_done"
@@ -653,6 +681,12 @@ func (s *Store) HandleHookEvent(payload models.HookPayload) {
 	}
 
 	s.mu.Unlock()
+
+	// Live process feed: watcher-sourced events DO append (they carry the
+	// thinking/text/results the hooks never send); boot replay never does.
+	if feedEvt != nil && payload.Source != "replay" {
+		s.AppendProcessEvent(payload.SessionID, feedEvt)
+	}
 
 	// Broadcast updated session state to WebSocket clients
 	s.broadcast(models.WebSocketMessage{
@@ -727,6 +761,25 @@ func (s *Store) GetSnapshot() models.ServerStateSnapshot {
 		ActiveSession: activeSession,
 		Sessions:      sessionList,
 		Notifications: notifs,
+	}
+
+	// Remote-interaction additions: parked decisions, app settings, and the
+	// active session's process-feed tail (last 50). GetSnapshot holds
+	// s.mu.RLock, so read the registry fields directly rather than calling
+	// the Lock-taking helpers.
+	snap.AppSettings = s.appSettings
+	if len(s.decisions.pending) > 0 {
+		snap.PendingDecisions = make([]*models.PendingDecision, 0, len(s.decisions.pending))
+		for _, e := range s.decisions.pending {
+			snap.PendingDecisions = append(snap.PendingDecisions, e.decision)
+		}
+	}
+	if activeSession != nil && len(activeSession.ProcessEvents) > 0 {
+		evts := activeSession.ProcessEvents
+		if len(evts) > 50 {
+			evts = evts[len(evts)-50:]
+		}
+		snap.RecentProcessEvents = evts
 	}
 
 	snap.SystemSummary.TotalSessions = len(sessionList)

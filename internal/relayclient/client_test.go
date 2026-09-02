@@ -177,13 +177,16 @@ func TestClientSnapshotBroadcastAndPeerJoined(t *testing.T) {
 		t.Fatalf("initial_state carries no snapshot: %v", frame["data"])
 	}
 
-	// (b) Store broadcast -> forwarded frame.
+	// (b) Store broadcast -> forwarded frame. A UserPromptSubmit now also
+	// emits a process_event (live feed, 2026-09-02) BEFORE session_update,
+	// so drain any process_event frames first.
 	store.HandleHookEvent(models.HookPayload{
 		HookEventName: "UserPromptSubmit",
 		SessionID:     "sess-1",
 		Cwd:           "D:\\proj",
 	})
-	frame = nextFrame(t, f)
+	for frame = nextFrame(t, f); frame["type"] == "process_event"; frame = nextFrame(t, f) {
+	}
 	if frame["type"] != "session_update" {
 		t.Fatalf("frame after hook event = %v, want session_update", frame["type"])
 	}
