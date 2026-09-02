@@ -33,6 +33,12 @@ Desktop server — claude-remote-server.exe
 ## Features
 
 - Real-time session status and sub-agent tracking — role, current activity, duration
+- **Live process view** — streaming agent steps (prompts, thinking, text, tool calls, results); long outputs scroll inside fixed-height boxes so the view stays stable
+- **Remote approvals** — allow / deny / always-allow Claude Code permission requests from your phone (active whenever the permission mode is not `bypassPermissions`); if you don't answer in time, the PC terminal prompt appears as fallback
+- **Remote question answering** — pick from the options of Claude Code's `AskUserQuestion` prompts (multi-select + free-text notes) and approve or reject `ExitPlanMode` plans
+- **Permission settings editor** — view and edit `~/.claude/settings.json` permission rules (mode + allow/ask/deny lists) from the phone
+- **Mid-task prompt injection** — queue a prompt while Claude is working; it is delivered when the current turn ends (the same queue-until-turn-end behavior as Claude Remote Control)
+- **Activity log clearing** — clear manually, or auto-clear entries older than 5/15/30 minutes
 - Heads-up notifications for questions, permission requests, and completions
 - Background tracking via an Android foreground service — survives app close, reconnects automatically
 - Missed-alert replay — what happened while the phone was offline plays back on reconnect
@@ -42,6 +48,20 @@ Desktop server — claude-remote-server.exe
 - Durable event log — recent session history survives server and PC restarts
 - Windows logon autostart via `-install`
 - Token authentication on every API and WebSocket request
+
+## Remote control from your phone
+
+The interactive features (approvals, questions, prompts, settings, log controls) work through the same hooks as everything else — no extra setup. They need the decision-mode hook entries, which the server installs automatically; if you are upgrading from an older release, restart the server once (or hit `POST /api/install-hooks`) so `~/.claude/settings.json` picks up the new entries, then start a fresh Claude Code session.
+
+How each piece behaves:
+
+- **Approvals.** When Claude Code is about to ask permission for a tool, the hook parks the request and your phone shows an Allow / Deny banner (with "always allow" options when the dialog offers them, plus an optional note for Claude). Answer within the configured wait (default 60 s, `Remote Settings → Remote approval wait`) or the request falls through to the normal terminal prompt. In `bypassPermissions` mode nothing is parked — prompts are skipped anyway.
+- **Questions.** `AskUserQuestion` options arrive as tappable choices (multi-select supported) with a free-text "Other / notes" field; `ExitPlanMode` shows the plan in a scrollable pane with Approve / Reject.
+- **Queued prompts.** Send while a turn is running and the prompt queues (the composer shows the queue depth); the Stop hook continues the conversation with your text when the turn finishes. Prompts queued while the session is fully idle are delivered on the next turn's end — a completely idle session has no hook to carry an injection (the official Remote Control has the same mid-turn queue semantics).
+- **Permission rules.** `Remote Settings` edits `permissions.defaultMode` and the allow/ask/deny rule lists using Claude Code's own rule syntax (`Bash(npm run *)`, `Read(./.env)`, …); every other settings key is preserved. Rules apply from Claude's next tool call.
+- **Logs.** `Activity Stream → trash icon` clears now; `Remote Settings → Activity log auto-clear` drops entries older than 5/15/30 minutes (Off by default).
+
+Everything rides the authenticated WebSocket, so it works identically over LAN and through the relay.
 
 ## Quick Start
 
