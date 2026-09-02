@@ -160,10 +160,6 @@ func (s *Store) broadcast(msg models.WebSocketMessage) {
 // replies from the api package).
 func (s *Store) Publish(msg models.WebSocketMessage) { s.broadcast(msg) }
 
-// ClearLogs is a TEMPORARY no-op stub — the real implementation (manual
-// clear + age-based auto-clear) lands with logs.go.
-func (s *Store) ClearLogs() {}
-
 // BroadcastStats fans out a lightweight `stats` frame (the snapshot's
 // SystemSummary) to every subscriber. It exists for the server's periodic
 // heartbeat (M4b): app-level clients like OkHttp never surface pong control
@@ -845,6 +841,10 @@ func (s *Store) StartLivenessWatcher() {
 // signal: a session is only marked stalled when it has NO in-flight tools, NO
 // pending question, and has been silent for the whole idle timeout.
 func (s *Store) checkLivenessAndAutoIdle() {
+	// Auto-clear window (5/15/30 min, 0=off) runs first — it takes its own
+	// lock, so it must precede the locked section below.
+	s.purgeStaleLogs(time.Now())
+
 	s.mu.Lock()
 	now := time.Now()
 
