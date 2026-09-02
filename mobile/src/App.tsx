@@ -8,9 +8,10 @@ import { ConnectionModal } from './components/ConnectionModal';
 import { QuestionPromptBanner } from './components/QuestionPromptBanner';
 import { LiveStreamBar } from './components/LiveStreamBar';
 import { BatteryBanner } from './components/BatteryBanner';
+import ProcessFeed from './components/ProcessFeed';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
-import { Session, AppNotification, ServerStateSnapshot, WebSocketMessage } from './types';
+import { Session, AppNotification, ProcessEvent, ServerStateSnapshot, WebSocketMessage } from './types';
 
 export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -31,6 +32,8 @@ export const App: React.FC = () => {
   // desktop server is not dialed in, so nothing will ever arrive. Cleared by
   // any real data frame (initial_state / session_update / notification).
   const [relayWaiting, setRelayWaiting] = useState<boolean>(false);
+  // Live process feed (2026-09-02): streaming agent execution steps.
+  const [processEvents, setProcessEvents] = useState<ProcessEvent[]>([]);
 
   useEffect(() => {
     // Check initial notification status
@@ -74,6 +77,7 @@ export const App: React.FC = () => {
     if (snap.active_session?.recent_logs) {
       setLogs(snap.active_session.recent_logs);
     }
+    setProcessEvents(snap.recent_process_events || []);
   };
 
   const handleWebSocketMessage = (msg: WebSocketMessage) => {
@@ -114,6 +118,31 @@ export const App: React.FC = () => {
         // silent blank screen. Any peers > 0 means the snapshot is imminent,
         // so make sure no stale waiting banner lingers.
         setRelayWaiting(msg.data?.peers === 0);
+        break;
+
+      case 'process_event': {
+        const evt = msg.data as ProcessEvent;
+        if (!evt || evt.id === 0) break;
+        setProcessEvents((prev) => {
+          // Dedup by id (a replayed snapshot may overlap) and cap at 200.
+          const next = prev.filter((p) => p.id !== evt.id);
+          next.push(evt);
+          next.sort((a, b) => a.id - b.id);
+          return next.slice(-200);
+        });
+        break;
+      }
+
+      case 'process_sync': {
+        const evts = (msg.data?.events || []) as ProcessEvent[];
+        setProcessEvents(evts.slice(-200));
+        break;
+      }
+
+      case 'logs_cleared':
+        setProcessEvents([]);
+        setLogs([]);
+        setNotifications([]);
         break;
     }
   };
@@ -225,7 +254,10 @@ export const App: React.FC = () => {
           subagentHistory={activeSession?.subagent_history || []}
         />
 
-        {/* 4. Real-Time Activity Log */}
+        {/* 4. Live Process Feed (streaming agent execution) */}
+        <ProcessFeed events={processEvents} />
+
+        {/* 5. Real-Time Activity Log */}
         <ActivityLogs logs={logs} notifications={notifications} />
       </main>
 
