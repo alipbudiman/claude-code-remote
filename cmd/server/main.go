@@ -97,6 +97,10 @@ func main() {
 	// 1. Initialize Thread-safe State Store
 	store := state.NewStoreWithIdleTimeout(port, hostIPs, idleTimeout)
 
+	// 1b. Remote-interaction settings (approval wait, log auto-clear) persist
+	// in ~/.claude/claude-remote-settings.json; defaults 60s / off.
+	store.SetAppSettings(api.LoadPersistedAppSettings())
+
 	// 1a. Durable ingestion: replay the raw event log (rebuilds sessions from
 	// the last 24h of accepted events), then drain any hook events the bridge
 	// spooled while the server was down. Both run BEFORE the HTTP server
