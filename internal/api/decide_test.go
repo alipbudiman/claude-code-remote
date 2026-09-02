@@ -75,7 +75,7 @@ func TestPermissionRequestAlwaysAllowEchoesSuggestion(t *testing.T) {
 	})
 	rec := postDecide(t, s, map[string]interface{}{
 		"hook_event_name": "PermissionRequest", "session_id": "s1", "permission_mode": "default",
-		"tool_name": "Bash",
+		"tool_name":              "Bash",
 		"permission_suggestions": []interface{}{sugg},
 	})
 	var out map[string]interface{}

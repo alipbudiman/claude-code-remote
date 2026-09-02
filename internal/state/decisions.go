@@ -59,8 +59,8 @@ func (s *Store) ResolveDecision(id string, res models.DecisionResolution) bool {
 	}
 	entry.resCh <- res
 	s.broadcast(models.WebSocketMessage{
-		Type: "decision_resolved",
-		Data: map[string]interface{}{"decision_id": id, "action": res.Action, "by": res.By},
+		Type:      "decision_resolved",
+		Data:      map[string]interface{}{"decision_id": id, "action": res.Action, "by": res.By},
 		Timestamp: time.Now(),
 	})
 	return true
@@ -117,8 +117,8 @@ func (s *Store) EnqueuePrompt(sessionID, text string) int {
 	}
 	s.mu.Unlock()
 	s.broadcast(models.WebSocketMessage{
-		Type: "prompt_queued",
-		Data: map[string]interface{}{"session_id": sessionID, "depth": depth},
+		Type:      "prompt_queued",
+		Data:      map[string]interface{}{"session_id": sessionID, "depth": depth},
 		Timestamp: time.Now(),
 	})
 	return depth

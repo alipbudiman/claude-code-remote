@@ -61,14 +61,14 @@ type Session struct {
 	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
 	// PromptQueueDepth counts prompts queued from the phone, delivered one
 	// per turn-end via the Stop hook's decision:block continuation.
-	PromptQueueDepth int    `json:"prompt_queue_depth,omitempty"`
+	PromptQueueDepth int `json:"prompt_queue_depth,omitempty"`
 	// ProcessEvents is the live process feed ring (newest last, capped).
-	ProcessEvents []ProcessEvent `json:"process_events,omitempty"`
-	TranscriptPath  string     `json:"transcript_path"`
-	StartTime       time.Time  `json:"start_time"`
-	LastActivity    time.Time  `json:"last_activity"`
-	LinesProcessed  int        `json:"lines_processed"`
-	RecentLogs      []string   `json:"recent_logs"`
+	ProcessEvents  []ProcessEvent `json:"process_events,omitempty"`
+	TranscriptPath string         `json:"transcript_path"`
+	StartTime      time.Time      `json:"start_time"`
+	LastActivity   time.Time      `json:"last_activity"`
+	LinesProcessed int            `json:"lines_processed"`
+	RecentLogs     []string       `json:"recent_logs"`
 }
 
 // HookPayload represents the JSON payload received from Claude Code hooks
@@ -183,16 +183,16 @@ type QuestionSpec struct {
 // PendingDecision is an approval/question/plan decision parked while the
 // hook long-polls, waiting for the phone (or the timeout fallback).
 type PendingDecision struct {
-	ID          string                   `json:"id"`
-	SessionID   string                   `json:"session_id"`
-	Kind        string                   `json:"kind"` // "permission" | "question" | "plan"
-	ToolName    string                   `json:"tool_name,omitempty"`
-	ToolUseID   string                   `json:"tool_use_id,omitempty"`
-	Title       string                   `json:"title"`
-	Question    string                   `json:"question,omitempty"`
-	ToolInput   map[string]interface{}  `json:"tool_input,omitempty"`
-	Questions   []QuestionSpec           `json:"questions,omitempty"`     // AskUserQuestion (normalized)
-	RawQuestions []interface{}           `json:"raw_questions,omitempty"` // AskUserQuestion (verbatim, for echo)
+	ID           string                 `json:"id"`
+	SessionID    string                 `json:"session_id"`
+	Kind         string                 `json:"kind"` // "permission" | "question" | "plan"
+	ToolName     string                 `json:"tool_name,omitempty"`
+	ToolUseID    string                 `json:"tool_use_id,omitempty"`
+	Title        string                 `json:"title"`
+	Question     string                 `json:"question,omitempty"`
+	ToolInput    map[string]interface{} `json:"tool_input,omitempty"`
+	Questions    []QuestionSpec         `json:"questions,omitempty"`     // AskUserQuestion (normalized)
+	RawQuestions []interface{}          `json:"raw_questions,omitempty"` // AskUserQuestion (verbatim, for echo)
 	// Suggestions holds the permission dialog's "always allow" options
 	// verbatim so a chosen one can be echoed back as updatedPermissions.
 	Suggestions []map[string]interface{} `json:"permission_suggestions,omitempty"`
@@ -202,11 +202,11 @@ type PendingDecision struct {
 
 // DecisionResolution is the phone's answer to a PendingDecision.
 type DecisionResolution struct {
-	Action     string                 `json:"action"` // allow|deny|always_allow|answer|dismiss|expire
+	Action     string                 `json:"action"`           // allow|deny|always_allow|answer|dismiss|expire
 	Answer     map[string]string      `json:"answer,omitempty"` // question text -> chosen label(s)
 	Notes      string                 `json:"notes,omitempty"`
 	Suggestion map[string]interface{} `json:"suggestion,omitempty"` // echoed permission_suggestions entry
-	By         string                 `json:"by,omitempty"` // "phone"|"timeout"
+	By         string                 `json:"by,omitempty"`         // "phone"|"timeout"
 }
 
 // AppSettings are this server's own remote-interaction settings.

@@ -153,8 +153,8 @@ func writeAskResponse(w http.ResponseWriter, payload models.HookPayload, res *mo
 	}
 	writeJSON(w, map[string]interface{}{
 		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName":         "PreToolUse",
-			"permissionDecision":    "deny",
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
 			"permissionDecisionReason": reason,
 		},
 	})
