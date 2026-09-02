@@ -81,6 +81,12 @@ type Client struct {
 	// included) before declaring the link dead. Defaults to
 	// defaultReadWindow; tests shrink it to make keepalive failures fast.
 	readWindow time.Duration
+
+	// OnClientFrame, when set, receives every phone-originated
+	// client_command frame (raw bytes, relayed verbatim). The api package
+	// registers the command dispatcher here — in relay mode this is the
+	// only path commands from the phone can take.
+	OnClientFrame func([]byte)
 }
 
 // NewClient builds a relay client for one relay address and token. relayURL
@@ -271,6 +277,15 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sub <-chan mod
 				select {
 				case peerJoined <- struct{}{}:
 				default:
+				}
+			case "client_command":
+				// Phone-originated command frame relayed verbatim. Hand the
+				// RAW bytes to the registered handler (the api package
+				// parses + dispatches); run async so a slow command can
+				// never stall the reader loop's keepalive.
+				if c.OnClientFrame != nil {
+					data := data
+					go c.OnClientFrame(data)
 				}
 			default:
 				c.logIgnored(head.Type)

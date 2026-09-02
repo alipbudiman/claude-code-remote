@@ -311,3 +311,54 @@ func waitForConnected(t *testing.T, c *Client, want bool, when string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// --- client_command relay path (2026-09-02) -----------------------------------
+
+// TestClientCommandFrameInvokesCallback: a phone frame forwarded by the relay
+// must reach OnClientFrame verbatim, and the handler's broadcast reply must
+// flow back over the same link.
+func TestClientCommandFrameInvokesCallback(t *testing.T) {
+	store := state.NewStore(0, nil)
+	f := newFakeRelay(t, 0)
+
+	relayAddr := "ws" + strings.TrimPrefix(f.srv.URL, "http")
+	c := NewClient(relayAddr, testToken, store)
+	got := make(chan []byte, 1)
+	c.OnClientFrame = func(frame []byte) {
+		got <- frame
+		// Reply like the api dispatcher would: broadcast back into the store.
+		store.Publish(models.WebSocketMessage{Type: "decision_resolved", Data: "ok", Timestamp: time.Now()})
+	}
+	c.Start(context.Background())
+	defer c.Stop()
+
+	conn := f.liveConn(t)
+	// Drain the initial snapshot.
+	nextFrame(t, f)
+
+	f.push(t, conn, map[string]interface{}{
+		"type": "client_command",
+		"data": map[string]interface{}{"op": "prompt", "session_id": "s1", "text": "hi"},
+	})
+
+	select {
+	case frame := <-got:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(frame, &parsed); err != nil {
+			t.Fatalf("callback frame not JSON: %v", err)
+		}
+		if parsed["type"] != "client_command" {
+			t.Fatalf("frame type = %v", parsed["type"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnClientFrame never invoked")
+	}
+
+	// The handler's broadcast reply must come back over the relay link.
+	for {
+		frame := nextFrame(t, f)
+		if frame["type"] == "decision_resolved" {
+			break
+		}
+	}
+}

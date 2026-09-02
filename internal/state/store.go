@@ -156,6 +156,14 @@ func (s *Store) broadcast(msg models.WebSocketMessage) {
 	}
 }
 
+// Publish sends one message to all subscribers (exported for command
+// replies from the api package).
+func (s *Store) Publish(msg models.WebSocketMessage) { s.broadcast(msg) }
+
+// ClearLogs is a TEMPORARY no-op stub — the real implementation (manual
+// clear + age-based auto-clear) lands with logs.go.
+func (s *Store) ClearLogs() {}
+
 // BroadcastStats fans out a lightweight `stats` frame (the snapshot's
 // SystemSummary) to every subscriber. It exists for the server's periodic
 // heartbeat (M4b): app-level clients like OkHttp never surface pong control

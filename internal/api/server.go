@@ -144,6 +144,13 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("/api/install-hooks", apiGate(s.handleInstallHooks))
 	s.mux.Handle("/api/health", apiGate(s.handleHealth))
 	s.mux.Handle("/api/relay", apiGate(s.handleRelay))
+	// Remote-interaction command mirrors (LAN/tests; phones use /ws frames).
+	s.mux.Handle("/api/decision", apiGate(s.handleDecisionPost))
+	s.mux.Handle("/api/prompt", apiGate(s.handlePromptPost))
+	s.mux.Handle("/api/process", apiGate(s.handleProcessGet))
+	s.mux.Handle("/api/logs/clear", apiGate(s.handleClearLogsPost))
+	s.mux.Handle("/api/settings", apiGate(s.handleSettings))
+	s.mux.Handle("/api/permissions", apiGate(s.handlePermissions))
 
 	// 4. Embedded Web UI Dashboard (static HTML only, no data — ungated)
 	s.mux.HandleFunc("/", s.handleStaticWeb)
@@ -364,14 +371,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetPongHandler(func(string) error { return extendReadDeadline() })
 
-	// Read (and discard) client messages until the connection dies.
+	// Read loop: dispatch client_command frames from the phone/web client
+	// (decisions, prompts, settings, log clears). Replies ride the normal
+	// broadcast pump, so no per-connection writes happen here. Malformed or
+	// non-command frames are ignored — the connection's job is reads.
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
 			return
 		}
 		if err := extendReadDeadline(); err != nil {
 			return
 		}
+		if len(data) == 0 {
+			continue
+		}
+		go s.handleClientFrameRaw(data)
 	}
 }
 
@@ -626,6 +641,9 @@ func (s *Server) StartRelay(relayURL string) {
 	// holds here because every apply builds a FRESH client and never calls
 	// Start on an existing one.
 	c := relayclient.NewClient(s.relayURL, s.token, s.store)
+	// Phone-originated command frames ride the relay link verbatim; hand
+	// them to the same dispatcher the /ws read loop uses.
+	c.OnClientFrame = func(frame []byte) { _ = s.handleClientFrameRaw(frame) }
 	c.Start(context.Background())
 	s.relayClient = c
 }
