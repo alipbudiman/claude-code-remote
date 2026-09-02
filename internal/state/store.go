@@ -58,6 +58,10 @@ type Store struct {
 	// lastEventAt is the time the most recent hook event was accepted;
 	// surfaced by /api/health. Zero means "no event yet".
 	lastEventAt time.Time
+	// decisions holds pending remote decisions and per-session prompt
+	// queues (2026-09-02); appSettings drives their behavior.
+	decisions   decisionRegistry
+	appSettings models.AppSettings
 }
 
 // NewStore initializes an empty state store with the default liveness timeout.
@@ -81,6 +85,8 @@ func NewStoreWithIdleTimeout(port int, hostIPs []string, idleTimeout time.Durati
 		idleTimeout:   idleTimeout,
 		seenToolIDs:   make(map[string]*toolIDCache),
 		stallNotified: make(map[string]bool),
+		decisions:     newDecisionRegistry(),
+		appSettings:   models.AppSettings{ApprovalWaitS: 60, LogAutoClearMin: 0},
 	}
 }
 
