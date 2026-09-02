@@ -9,9 +9,10 @@ import { QuestionPromptBanner } from './components/QuestionPromptBanner';
 import { LiveStreamBar } from './components/LiveStreamBar';
 import { BatteryBanner } from './components/BatteryBanner';
 import ProcessFeed from './components/ProcessFeed';
+import DecisionBanner from './components/DecisionBanner';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
-import { Session, AppNotification, ProcessEvent, ServerStateSnapshot, WebSocketMessage } from './types';
+import { Session, AppNotification, PendingDecision, ProcessEvent, ServerStateSnapshot, WebSocketMessage } from './types';
 
 export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -34,6 +35,9 @@ export const App: React.FC = () => {
   const [relayWaiting, setRelayWaiting] = useState<boolean>(false);
   // Live process feed (2026-09-02): streaming agent execution steps.
   const [processEvents, setProcessEvents] = useState<ProcessEvent[]>([]);
+  // Remote decision (2026-09-02): the interactive banner's pending approval /
+  // question / plan. Cleared on decision_resolved (answer or expiry).
+  const [activeDecision, setActiveDecision] = useState<PendingDecision | undefined>();
 
   useEffect(() => {
     // Check initial notification status
@@ -78,6 +82,9 @@ export const App: React.FC = () => {
       setLogs(snap.active_session.recent_logs);
     }
     setProcessEvents(snap.recent_process_events || []);
+    // Show the newest parked decision (usually none or one).
+    const pending = snap.pending_decisions || [];
+    setActiveDecision(pending.length > 0 ? pending[pending.length - 1] : undefined);
   };
 
   const handleWebSocketMessage = (msg: WebSocketMessage) => {
@@ -143,6 +150,17 @@ export const App: React.FC = () => {
         setProcessEvents([]);
         setLogs([]);
         setNotifications([]);
+        break;
+
+      case 'decision_pending':
+        setRelayWaiting(false);
+        setActiveDecision(msg.data as PendingDecision);
+        break;
+
+      case 'decision_resolved':
+        setActiveDecision((cur) =>
+          cur && cur.id === (msg.data as { decision_id: string }).decision_id ? undefined : cur
+        );
         break;
     }
   };
@@ -234,12 +252,22 @@ export const App: React.FC = () => {
         {/* 0a. Battery Optimization Warning Banner */}
         <BatteryBanner />
 
-        {/* 0b. Live Question / Permission Callout Banner */}
-        {activeSession?.pending_question && (
-          <QuestionPromptBanner
-            pendingQuestion={activeSession.pending_question}
-            projectName={activeSession.project_name}
+        {/* 0b. Interactive Decision Banner (remote approvals / questions /
+            plan review). Falls back to the legacy display-only banner when
+            no interactive decision is parked (approvals off, server older,
+            or the question arrived while we were offline). */}
+        {activeDecision ? (
+          <DecisionBanner
+            decision={activeDecision}
+            onRespond={(input) => wsService.sendDecision(input)}
           />
+        ) : (
+          activeSession?.pending_question && (
+            <QuestionPromptBanner
+              pendingQuestion={activeSession.pending_question}
+              projectName={activeSession.project_name}
+            />
+          )
         )}
 
         {/* 1. Status Hero Monitor with Color/Mono SVG Icons */}
