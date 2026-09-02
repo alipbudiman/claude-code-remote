@@ -69,19 +69,38 @@ func TestPurgeStaleLogsDropsOldNotifications(t *testing.T) {
 	}
 }
 
+func TestPurgeStaleLogsPrunesRecentLogs(t *testing.T) {
+	s := NewStore(0, nil)
+	s.SetAppSettings(models.AppSettings{ApprovalWaitS: 60, LogAutoClearMin: 5})
+	s.HandleHookEvent(models.HookPayload{HookEventName: "UserPromptSubmit", SessionID: "s1", Prompt: "hi"})
+	sess := s.GetSnapshot().ActiveSession
+	if len(sess.RecentLogs) == 0 {
+		t.Fatal("expected recent logs entries")
+	}
+	// Entries carry the writer's [HH:MM:SS] stamp of "now" — inside the 5m
+	// window they survive; nothing to age here, so verify the parse itself
+	// keeps them.
+	s.purgeStaleLogs(time.Now())
+	sess = s.GetSnapshot().ActiveSession
+	if len(sess.RecentLogs) == 0 {
+		t.Fatal("fresh entries must be kept")
+	}
+}
+
 func TestParseLogTime(t *testing.T) {
 	now := time.Date(2026, 9, 2, 15, 0, 0, 0, time.Local)
-	got, ok := parseLogTime("[14:30] something happened", now)
+	// Real writer format: "[15:04:05]" with seconds (store.go appendLog).
+	got, ok := parseLogTime("[14:30:05] something happened", now)
 	if !ok {
 		t.Fatal("expected parse success")
 	}
-	want := time.Date(2026, 9, 2, 14, 30, 0, 0, time.Local)
+	want := time.Date(2026, 9, 2, 14, 30, 5, 0, time.Local)
 	if !got.Equal(want) {
 		t.Fatalf("parsed %v, want %v", got, want)
 	}
 	// Midnight wrap: a clock time 12h in the future belongs to yesterday.
 	late := time.Date(2026, 9, 3, 0, 5, 0, 0, time.Local)
-	got, ok = parseLogTime("[23:50] entry", late)
+	got, ok = parseLogTime("[23:50:00] entry", late)
 	if !ok {
 		t.Fatal("expected parse success")
 	}

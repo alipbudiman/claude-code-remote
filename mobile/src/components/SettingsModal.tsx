@@ -41,7 +41,11 @@ export default function SettingsModal({
 
   if (!open) return null;
 
-  const pushRules = (next: typeof lists, nextMode = mode) =>
+  // pushRules sends the FULL permissions object built from local state. Until
+  // permissions_get's reply arrives that state is empty — sending now would
+  // wipe every existing rule in settings.json. Block all writes until loaded.
+  const pushRules = (next: typeof lists, nextMode = mode) => {
+    if (!permissions) return;
     onPermissions({
       ...permissions,
       defaultMode: nextMode,
@@ -49,6 +53,7 @@ export default function SettingsModal({
       ask: next.ask,
       deny: next.deny,
     });
+  };
 
   const sectionCls = 'rounded-2xl bg-black/30 border border-white/5 p-4 space-y-3';
   const labelCls = 'text-[10px] font-extrabold uppercase tracking-wider text-slate-400';
@@ -71,7 +76,10 @@ export default function SettingsModal({
 
         <div className={sectionCls}>
           <p className={labelCls}>Permission Mode (settings.json)</p>
-          <div className="grid grid-cols-2 gap-2">
+          {!permissions && (
+            <p className="text-[11px] text-slate-500 animate-pulse">Loading current rules from PC…</p>
+          )}
+          <div className={`grid grid-cols-2 gap-2 ${!permissions ? 'opacity-40 pointer-events-none' : ''}`}>
             {MODES.map((m) => (
               <button
                 key={m}
@@ -119,6 +127,7 @@ export default function SettingsModal({
               <input
                 value={newRule[kind]}
                 onChange={(e) => setNewRule({ ...newRule, [kind]: e.target.value })}
+                disabled={!permissions}
                 placeholder={`e.g. ${kind === 'allow' ? 'Bash(npm run *)' : 'Bash(git push *)'}`}
                 className="flex-1 min-h-[40px] px-3 py-2 rounded-xl bg-black/40 border border-white/10 font-mono text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-[#D97757]"
               />
@@ -132,7 +141,8 @@ export default function SettingsModal({
                   pushRules(next);
                   setNewRule({ ...newRule, [kind]: '' });
                 }}
-                className="px-3 py-2 rounded-xl bg-[#D97757]/20 border border-[#D97757]/40 text-[#e88666] text-[11px] font-bold"
+                disabled={!permissions}
+                className="px-3 py-2 rounded-xl bg-[#D97757]/20 border border-[#D97757]/40 text-[#e88666] text-[11px] font-bold disabled:opacity-40"
               >
                 Add
               </button>
@@ -146,7 +156,7 @@ export default function SettingsModal({
             <input
               type="range"
               min={15}
-              max={110}
+              max={105}
               step={5}
               value={settings.approval_wait_s}
               onChange={(e) => onAppSettings({ ...settings, approval_wait_s: Number(e.target.value) })}

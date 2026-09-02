@@ -34,7 +34,9 @@ type clientCommand struct {
 }
 
 // handleClientFrameRaw parses one raw client frame and dispatches it.
-// Returns the HTTP-style status for REST callers (200/400/404/500).
+// Returns the HTTP-style status for REST callers (200/400/404/500). Called
+// synchronously from the /ws read loop and the relay reader so command ORDER
+// is preserved (a one-goroutine-per-frame dispatch could reorder prompts).
 func (s *Server) handleClientFrameRaw(body []byte) int {
 	var frame struct {
 		Type string        `json:"type"`
@@ -43,7 +45,18 @@ func (s *Server) handleClientFrameRaw(body []byte) int {
 	if err := json.Unmarshal(body, &frame); err != nil || frame.Type != "client_command" {
 		return http.StatusBadRequest
 	}
-	return s.dispatchCommand(frame.Data)
+	code := s.dispatchCommand(frame.Data)
+	if code != http.StatusOK {
+		// Surface failures to the phone (optimistic UI can then refetch
+		// the truth) — a rejected permissions_set would otherwise leave the
+		// local list looking applied.
+		s.store.Publish(models.WebSocketMessage{
+			Type:      "command_error",
+			Data:      map[string]interface{}{"op": frame.Data.Op, "status": code},
+			Timestamp: time.Now(),
+		})
+	}
+	return code
 }
 
 func (s *Server) dispatchCommand(c clientCommand) int {
@@ -74,15 +87,17 @@ func (s *Server) dispatchCommand(c clientCommand) int {
 		s.store.ClearLogs()
 		return http.StatusOK
 	case "app_settings":
-		cur := s.store.AppSettings()
 		if c.ApprovalWaitS != nil {
-			cur.ApprovalWaitS = clampApprovalWait(*c.ApprovalWaitS)
+			clamped := clampApprovalWait(*c.ApprovalWaitS)
+			c.ApprovalWaitS = &clamped
 		}
 		if c.LogAutoClearMin != nil {
-			cur.LogAutoClearMin = clampAutoClear(*c.LogAutoClearMin)
+			clamped := clampAutoClear(*c.LogAutoClearMin)
+			c.LogAutoClearMin = &clamped
 		}
-		s.store.SetAppSettings(cur)
-		s.persistAppSettings(cur)
+		// Atomic merge under one lock — the previous unlocked
+		// read-modify-write could lose a concurrent update.
+		s.persistAppSettings(s.store.UpdateAppSettings(c.ApprovalWaitS, c.LogAutoClearMin))
 		return http.StatusOK
 	case "permissions_get":
 		perms, err := s.permissionsGet()

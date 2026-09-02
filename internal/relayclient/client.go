@@ -281,11 +281,11 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sub <-chan mod
 			case "client_command":
 				// Phone-originated command frame relayed verbatim. Hand the
 				// RAW bytes to the registered handler (the api package
-				// parses + dispatches); run async so a slow command can
-				// never stall the reader loop's keepalive.
+				// parses + dispatches) synchronously so command ORDER is
+				// preserved; handlers are fast and never block on the
+				// network, so the keepalive window is safe.
 				if c.OnClientFrame != nil {
-					data := data
-					go c.OnClientFrame(data)
+					c.OnClientFrame(data)
 				}
 			default:
 				c.logIgnored(head.Type)

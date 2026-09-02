@@ -17,22 +17,37 @@ const (
 var eventSeq uint64
 
 // AppendProcessEvent stamps + stores evt in the session's ring and
-// broadcasts process_event. Detail is capped at MaxEventDetail.
+// broadcasts process_event. Detail is capped at MaxEventDetail. Tool events
+// keyed by tool_use_id are deduplicated: the JSONL watcher and the hooks can
+// both deliver the same tool call (hook-after-watcher is not dropped by the
+// store's asymmetric replay guard), and the feed must not show it twice.
 func (s *Store) AppendProcessEvent(sessionID string, evt *models.ProcessEvent) {
 	if len(evt.Detail) > MaxEventDetail {
 		const marker = "\n… [truncated]"
 		evt.Detail = evt.Detail[:MaxEventDetail-len(marker)] + marker
 	}
 	s.mu.Lock()
-	eventSeq++
-	evt.ID = eventSeq
-	evt.SessionID = sessionID
-	evt.Timestamp = time.Now()
 	sess, ok := s.sessions[sessionID]
 	if !ok {
 		// Events may arrive before any hook for the session (watcher path).
 		sess = s.getOrCreateSessionLocked(sessionID, "", "")
 	}
+	if evt.ToolUseID != "" {
+		switch evt.Kind {
+		case models.EventToolUse, models.EventToolResult, models.EventToolError:
+			for i := range sess.ProcessEvents {
+				if sess.ProcessEvents[i].ToolUseID == evt.ToolUseID &&
+					sess.ProcessEvents[i].Kind == evt.Kind {
+					s.mu.Unlock()
+					return // already surfaced by the other channel
+				}
+			}
+		}
+	}
+	eventSeq++
+	evt.ID = eventSeq
+	evt.SessionID = sessionID
+	evt.Timestamp = time.Now()
 	sess.ProcessEvents = append(sess.ProcessEvents, *evt)
 	if len(sess.ProcessEvents) > processRingCap {
 		sess.ProcessEvents = sess.ProcessEvents[len(sess.ProcessEvents)-processRingCap:]

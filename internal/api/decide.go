@@ -26,7 +26,10 @@ import (
 
 const (
 	minApprovalWait = 15 * time.Second
-	maxApprovalWait = 110 * time.Second
+	// maxApprovalWait stays strictly UNDER the bridge script's 110s HTTP
+	// timeout so a decision answered at the very end of the window still
+	// reaches the hook before the script gives up (spool + silent exit).
+	maxApprovalWait = 105 * time.Second
 )
 
 // approvalWait resolves the effective decision wait: the test override, else
@@ -63,7 +66,9 @@ func (s *Server) decideHookEvent(w http.ResponseWriter, payload models.HookPaylo
 		}
 		d := buildPermissionDecision(payload)
 		id := s.store.CreatePendingDecision(d)
-		s.store.AddNotification(d.SessionID, "⚠️ "+d.Title, d.Question, "permission")
+		// NOTE: no extra AddNotification here — HandleHookEvent's switch
+		// already raised the heads-up for this event; a second one would
+		// double-alert the phone.
 		if res, ok := s.store.WaitForDecision(id, s.approvalWait()); ok {
 			w.Header().Set("Content-Type", "application/json")
 			dec := map[string]interface{}{"behavior": "allow"}
@@ -89,7 +94,6 @@ func (s *Server) decideHookEvent(w http.ResponseWriter, payload models.HookPaylo
 		}
 		d := buildQuestionDecision(payload)
 		id := s.store.CreatePendingDecision(d)
-		s.store.AddNotification(d.SessionID, "⚠️ "+d.Title, firstNonEmpty(d.Question, d.Title), "permission")
 		if res, ok := s.store.WaitForDecision(id, s.approvalWait()); ok {
 			w.Header().Set("Content-Type", "application/json")
 			writeAskResponse(w, payload, res)
@@ -133,14 +137,20 @@ func writeAskResponse(w http.ResponseWriter, payload models.HookPayload, res *mo
 		return
 	}
 	if res.Action == "allow" || res.Action == "always_allow" {
-		// Plan approval (ExitPlanMode): plain allow — the plan already
-		// lives in the injected tool_input.
-		writeJSON(w, map[string]interface{}{
+		// Plan approval (ExitPlanMode): allow, echoing the injected
+		// tool_input (plan + filePath) back in updatedInput — the documented
+		// contract for interaction-requiring tools wants allow + updatedInput
+		// together, and the echo is harmless when redundant.
+		out := map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName":      "PreToolUse",
 				"permissionDecision": "allow",
 			},
-		})
+		}
+		if askQ || payload.ToolInput != nil {
+			out["hookSpecificOutput"].(map[string]interface{})["updatedInput"] = payload.ToolInput
+		}
+		writeJSON(w, out)
 		return
 	}
 	// deny / dismiss

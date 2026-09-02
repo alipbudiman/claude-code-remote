@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { StatusHero } from './components/StatusHero';
 import { ChromeRemoteButton } from './components/ChromeRemoteButton';
@@ -47,6 +47,9 @@ export const App: React.FC = () => {
   const [isRemoteSettingsOpen, setIsRemoteSettingsOpen] = useState<boolean>(false);
   const [appSettings, setAppSettings] = useState<AppSettings>({ approval_wait_s: 60, log_autoclear_min: 0 });
   const [permissions, setPermissions] = useState<PermissionsConfig | undefined>();
+  // Mirror for the message handler (its closure would otherwise see a stale
+  // open-state from the first render).
+  const isRemoteSettingsOpenRef = useRef(false);
 
   useEffect(() => {
     // Check initial notification status
@@ -102,6 +105,11 @@ export const App: React.FC = () => {
       case 'initial_state':
         setRelayWaiting(false);
         handleSnapshot(msg.data as ServerStateSnapshot);
+        // A reconnect drops in-flight replies (the relay drains buffered
+        // frames); re-request the permissions view if the editor is open.
+        if (isRemoteSettingsOpenRef.current) {
+          wsService.sendCommand('permissions_get');
+        }
         break;
 
       case 'session_update': {
@@ -180,6 +188,18 @@ export const App: React.FC = () => {
       case 'permissions':
         setPermissions((msg.data as { permissions: PermissionsConfig }).permissions);
         break;
+
+      case 'command_error': {
+        // A dispatched command was rejected — the optimistic UI must not
+        // keep showing it as applied. Re-fetch the truth for the affected op.
+        const op = (msg.data as { op: string }).op;
+        if (op === 'permissions_set') {
+          wsService.sendCommand('permissions_get');
+        } else if (op === 'app_settings') {
+          wsService.sendCommand('process_sync'); // next snapshot/app_settings broadcast corrects it
+        }
+        break;
+      }
     }
   };
 
@@ -241,6 +261,7 @@ export const App: React.FC = () => {
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenRemoteSettings={() => {
           setIsRemoteSettingsOpen(true);
+          isRemoteSettingsOpenRef.current = true;
           wsService.sendCommand('permissions_get');
         }}
         onRequestNotifications={handleRequestNotifications}
@@ -343,7 +364,10 @@ export const App: React.FC = () => {
       {/* Remote Settings Modal (permissions, approvals, log auto-clear) */}
       <SettingsModal
         open={isRemoteSettingsOpen}
-        onClose={() => setIsRemoteSettingsOpen(false)}
+        onClose={() => {
+          setIsRemoteSettingsOpen(false);
+          isRemoteSettingsOpenRef.current = false;
+        }}
         settings={appSettings}
         permissions={permissions}
         onAppSettings={(s) => {

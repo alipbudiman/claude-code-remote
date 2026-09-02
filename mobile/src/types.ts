@@ -82,7 +82,7 @@ export interface WebSocketMessage {
     // Remote-interaction frames (2026-09-02).
     | 'process_event' | 'process_sync' | 'decision_pending' | 'decision_resolved'
     | 'prompt_queued' | 'logs_cleared' | 'app_settings' | 'permissions'
-    | 'client_command';
+    | 'command_error' | 'client_command';
   data: any;
   timestamp: string;
 }

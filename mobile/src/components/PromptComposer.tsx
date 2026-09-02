@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { CornerDownLeft, Inbox, Loader2 } from 'lucide-react';
+import { CornerDownLeft, Inbox, Loader2, WifiOff } from 'lucide-react';
 import type { Session } from '../types';
 
 interface Props {
   session?: Session;
   isWorking: boolean;
-  onSend: (text: string) => void;
+  /** Returns false when the send could not go out (socket down) — the
+ *  composer then keeps the text instead of silently dropping it. */
+  onSend: (text: string) => boolean;
 }
 
 /**
@@ -16,13 +18,20 @@ interface Props {
  */
 export default function PromptComposer({ session, isWorking, onSend }: Props) {
   const [text, setText] = useState('');
+  const [sendFailed, setSendFailed] = useState(false);
   const queueDepth = session?.prompt_queue_depth ?? 0;
   const disabled = !session;
 
   const send = () => {
     const t = text.trim();
     if (!t || disabled) return;
-    onSend(t);
+    if (!onSend(t)) {
+      // Socket not open (reconnect window) — keep the text so nothing is
+      // lost; the user retries when the link is back.
+      setSendFailed(true);
+      return;
+    }
+    setSendFailed(false);
     setText('');
   };
 
@@ -68,6 +77,11 @@ export default function PromptComposer({ session, isWorking, onSend }: Props) {
           Send
         </button>
       </div>
+      {sendFailed && (
+        <p className="flex items-center gap-1.5 text-[10px] text-amber-400 mt-2">
+          <WifiOff size={11} /> Not sent — connection is down. Your text is kept; try again when reconnected.
+        </p>
+      )}
       <p className="text-[10px] text-slate-600 mt-2">
         {isWorking
           ? 'Claude is working — your prompt is queued and delivered when the current turn finishes (same behavior as Claude Remote Control).'

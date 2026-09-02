@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"claude-remote-server/internal/models"
@@ -24,8 +25,42 @@ func newDecisionRegistry() decisionRegistry {
 	return decisionRegistry{pending: make(map[string]*decisionEntry), queues: make(map[string][]string)}
 }
 
+// decisionSeq guarantees unique ids even when two decisions are created
+// within the same clock tick (Windows wall-clock granularity).
+var decisionSeq atomic.Uint64
+
 func (s *Store) nextDecisionID() string {
-	return fmt.Sprintf("dec-%d", time.Now().UnixNano())
+	return fmt.Sprintf("dec-%d-%d", time.Now().UnixNano(), decisionSeq.Add(1))
+}
+
+// UpdateAppSettings atomically merges partial settings under ONE lock — the
+// unlocked read-modify-write the app_settings command used first could lose
+// a concurrent update and persist the loser.
+func (s *Store) UpdateAppSettings(waitS, autoclearMin *int) models.AppSettings {
+	s.mu.Lock()
+	if waitS != nil {
+		s.appSettings.ApprovalWaitS = *waitS
+	}
+	if autoclearMin != nil {
+		s.appSettings.LogAutoClearMin = *autoclearMin
+	}
+	out := s.appSettings
+	s.mu.Unlock()
+	s.broadcast(models.WebSocketMessage{Type: "app_settings", Data: out, Timestamp: time.Now()})
+	return out
+}
+
+// PeekNextPrompt reports the oldest queued prompt without draining it (the
+// Stop decide path peeks BEFORE feeding the event so a to-be-delivered
+// prompt skips the false turn-end state application).
+func (s *Store) PeekNextPrompt(sessionID string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	q := s.decisions.queues[sessionID]
+	if len(q) == 0 {
+		return "", false
+	}
+	return q[0], true
 }
 
 // CreatePendingDecision registers d (assigning ID + expiry) and broadcasts

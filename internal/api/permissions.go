@@ -73,6 +73,8 @@ func writeSettings(cfg map[string]interface{}) error {
 
 // permissionsGet returns the settings.json permissions section ({} if absent).
 func (s *Server) permissionsGet() (map[string]interface{}, error) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	cfg, err := readSettings()
 	if err != nil {
 		return nil, err
@@ -83,32 +85,62 @@ func (s *Server) permissionsGet() (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
 }
 
-// permissionsSet validates and writes the permissions section, preserving
-// every other settings key, then broadcasts the new value.
+// permissionsSet validates and MERGES the incoming permissions into the
+// current section (keys the caller omits — e.g. additionalDirectories —
+// survive), preserving every other settings key, then broadcasts the new
+// value. The whole read-modify-write holds settingsMu: concurrent
+// command-frame dispatches would otherwise interleave writes and corrupt
+// the file.
 func (s *Server) permissionsSet(perms map[string]interface{}) error {
 	if mode, ok := perms["defaultMode"].(string); ok && !validModes[mode] {
 		return fmt.Errorf("invalid defaultMode %q", mode)
 	}
 	for _, key := range []string{"allow", "ask", "deny", "additionalDirectories"} {
-		if v, ok := perms[key]; ok {
-			if _, ok := v.([]interface{}); !ok {
-				return fmt.Errorf("%s must be an array of strings", key)
+		v, ok := perms[key]
+		if !ok {
+			continue // omitted keys merge: the existing value survives
+		}
+		list, ok := v.([]interface{})
+		if !ok {
+			return fmt.Errorf("%s must be an array of strings", key)
+		}
+		for _, el := range list {
+			if _, ok := el.(string); !ok {
+				return fmt.Errorf("%s must contain only strings", key)
 			}
 		}
 	}
+
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	cfg, err := readSettings()
 	if err != nil {
 		return err
 	}
-	cfg["permissions"] = perms
+	merged, _ := cfg["permissions"].(map[string]interface{})
+	if merged == nil {
+		merged = map[string]interface{}{}
+	}
+	for k, v := range perms {
+		merged[k] = v
+	}
+	cfg["permissions"] = merged
 	if err := writeSettings(cfg); err != nil {
 		return err
 	}
-	out, _ := s.permissionsGet()
+	out := merged
 	s.store.Publish(models.WebSocketMessage{
 		Type: "permissions", Data: map[string]interface{}{"permissions": out}, Timestamp: time.Now(),
 	})
 	return nil
+}
+
+// writeErr emits a properly escaped JSON error body (raw string
+// concatenation breaks when the error text contains quotes).
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // handlePermissions serves GET/POST /api/permissions.
@@ -117,7 +149,7 @@ func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		perms, err := s.permissionsGet()
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, map[string]interface{}{"permissions": perms})
@@ -126,11 +158,11 @@ func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
 			Permissions map[string]interface{} `json:"permissions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Permissions == nil {
-			http.Error(w, `{"error":"body must be {\"permissions\":{...}}"}`, http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, `body must be {"permissions":{...}}`)
 			return
 		}
 		if err := s.permissionsSet(body.Permissions); err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeOK(w)

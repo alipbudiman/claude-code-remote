@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Brain, Check, ClipboardCheck, HelpCircle, Send, ShieldAlert } from 'lucide-react';
 import type { DecisionRespondInput, PendingDecision, QuestionSpec } from '../types';
 
@@ -13,11 +13,10 @@ function Countdown({ expiresAt }: { expiresAt: string }) {
   useEffect(() => {
     const t = window.setInterval(() => forceTick((n) => n + 1), 1000);
     return () => window.clearInterval(t);
-  }, []);
-  const left = useMemo(
-    () => Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000)),
-    [expiresAt, forceTick]
-  );
+  }, [expiresAt]);
+  // Computed WITHOUT useMemo: the 1s re-render must recompute, and the memo's
+  // dep on a stable setter never invalidated it (frozen countdown bug).
+  const left = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
   return (
     <span className="ml-auto text-[10px] font-mono text-amber-400/80">
       {left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'expiring…'}
@@ -32,7 +31,8 @@ function QuestionBlock({ q, onPick }: { q: QuestionSpec; onPick: (label: string)
       ? (picked.includes(label) ? picked.filter((p) => p !== label) : [...picked, label])
       : [label];
     setPicked(next);
-    onPick(next.join('; '));
+    // Comma separator matches Claude Code's own multi-select join.
+    onPick(next.join(', '));
   };
   return (
     <div className="space-y-1.5">
@@ -66,13 +66,25 @@ function QuestionBlock({ q, onPick }: { q: QuestionSpec; onPick: (label: string)
 export default function DecisionBanner({ decision, onRespond }: Props) {
   const [notes, setNotes] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  // Reset per-decision state when a NEW decision replaces this one — notes
+  // and picked options must never leak across decisions.
+  useEffect(() => {
+    setNotes('');
+    setAnswers({});
+  }, [decision?.id]);
   if (!decision) return null;
 
   const isQ = decision.kind === 'question';
   const isPlan = decision.kind === 'plan';
   const Icon = isQ ? HelpCircle : isPlan ? ClipboardCheck : ShieldAlert;
   const label = isQ ? 'CLAUDE HAS A QUESTION' : isPlan ? 'PLAN REVIEW' : 'PERMISSION REQUIRED';
-  const hasAnswer = Object.keys(answers).length > 0;
+  const questions = decision.questions ?? [];
+  // Every question must be answered before sending — a partial answers map
+  // would ship Claude an incomplete updatedInput.answers object.
+  const hasAnswer = questions.length > 0 && Object.keys(answers).length >= questions.length;
+  // Long question text (a command, a file, an error) renders in the same
+  // fixed-height scroll box the spec mandates for long process text.
+  const longQuestion = !isPlan && !!decision.question && decision.question.length > 240;
 
   return (
     <section className="rounded-3xl bg-gradient-to-r from-amber-950/70 via-amber-900/50 to-[#181a24] border-2 border-amber-500/60 p-5 shadow-[0_0_30px_rgba(245,158,11,0.25)] animate-in fade-in zoom-in-95 duration-300">
@@ -88,7 +100,12 @@ export default function DecisionBanner({ decision, onRespond }: Props) {
           {decision.question}
         </div>
       )}
-      {!isPlan && decision.question && (
+      {!isPlan && decision.question && longQuestion && (
+        <div className="h-32 overflow-y-auto rounded-xl bg-black/40 border border-white/10 p-3 mb-3 font-mono text-[11px] text-amber-100/90 whitespace-pre-wrap">
+          {decision.question}
+        </div>
+      )}
+      {!isPlan && decision.question && !longQuestion && (
         <p className="text-xs text-amber-100/90 mb-3 break-words">{decision.question}</p>
       )}
       {decision.tool_name && (

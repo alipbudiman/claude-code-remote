@@ -260,3 +260,38 @@ func TestStopDeliversQueuedPromptOnce(t *testing.T) {
 		t.Fatal("queue must be empty after delivery")
 	}
 }
+
+func TestStopWithPromptSkipsTurnEndState(t *testing.T) {
+	s, store := newDecideServer(t)
+	// Open a working turn first.
+	store.HandleHookEvent(models.HookPayload{HookEventName: "UserPromptSubmit", SessionID: "s1", Prompt: "go"})
+	store.EnqueuePrompt("s1", "follow-up")
+	rec := postDecide(t, s, map[string]interface{}{
+		"hook_event_name": "Stop", "session_id": "s1", "stop_hook_active": false,
+	})
+	var out map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["reason"] != "follow-up" {
+		t.Fatalf("expected block+follow-up, got %s", rec.Body.String())
+	}
+	// The turn did NOT end: no task_done marker, session not idle.
+	sess := store.GetSnapshot().ActiveSession
+	if sess == nil {
+		t.Fatal("session vanished")
+	}
+	if sess.Status == models.StatusIdle || sess.LastCompletedAt != nil {
+		t.Fatalf("blocked Stop must not apply turn-end state: status=%v completed=%v", sess.Status, sess.LastCompletedAt)
+	}
+}
+
+func TestDecisionIDsUniqueSameTick(t *testing.T) {
+	s := state.NewStore(0, nil)
+	ids := make(map[string]bool)
+	for i := 0; i < 50; i++ {
+		id := s.CreatePendingDecision(&models.PendingDecision{SessionID: "s", Kind: "permission"})
+		if ids[id] {
+			t.Fatalf("duplicate decision id %s", id)
+		}
+		ids[id] = true
+	}
+}

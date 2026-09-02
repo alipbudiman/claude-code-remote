@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,6 +83,12 @@ type Server struct {
 	// approvalWaitOverride shrinks the decision long-poll window in tests
 	// (0 = use the app-settings window; see decide.go).
 	approvalWaitOverride time.Duration
+
+	// settingsMu serializes every read-modify-write of ~/.claude/settings.json
+	// (permissions editor, hook re-install): concurrent client_command frames
+	// each dispatch on their own goroutine-turned-synchronous path and would
+	// otherwise interleave file writes.
+	settingsMu sync.Mutex
 
 	// relayMu guards relayClient/relayURL — the runtime-swappable relay
 	// connection (M11). The dashboard's POST /api/relay stops the current
@@ -257,14 +264,36 @@ func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
 	// delivery is treated as a live event.
 	payload.Source = ""
 
-	s.store.HandleHookEvent(payload)
-
 	// Decision mode (?decide=1, sent by the bridge's --decide entries):
 	// park a pending decision for permission/question/plan events and
 	// long-poll for the phone's answer; Stop checks the prompt queue. The
 	// response body is the Claude Code hook JSON the bridge forwards on
 	// stdout. Feed events (default mode) keep the plain ok response.
-	if r.URL.Query().Get("decide") == "1" {
+	decide := r.URL.Query().Get("decide") == "1"
+
+	// A Stop that will deliver a queued prompt must NOT apply turn-end
+	// state first: blocking the stop means the turn CONTINUES, so marking
+	// the session idle/completed (and firing task_done) would be a false
+	// end. Peek before feeding; skip the state application entirely when a
+	// prompt is about to be delivered.
+	if decide && payload.HookEventName == "Stop" &&
+		!(payload.StopHookActive != nil && *payload.StopHookActive) {
+		if _, has := s.store.PeekNextPrompt(payload.SessionID); has {
+			prompt, _ := s.store.DrainNextPrompt(payload.SessionID)
+			s.store.Publish(models.WebSocketMessage{
+				Type:      "prompt_queued",
+				Data:      map[string]interface{}{"session_id": payload.SessionID, "depth": s.store.PromptQueueDepth(payload.SessionID)},
+				Timestamp: time.Now(),
+			})
+			s.store.AddNotification(payload.SessionID, "📲 Prompt delivered", prompt, "info")
+			writeJSON(w, map[string]interface{}{"decision": "block", "reason": prompt})
+			return
+		}
+	}
+
+	s.store.HandleHookEvent(payload)
+
+	if decide {
 		s.decideHookEvent(w, payload)
 		return
 	}
@@ -372,9 +401,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(func(string) error { return extendReadDeadline() })
 
 	// Read loop: dispatch client_command frames from the phone/web client
-	// (decisions, prompts, settings, log clears). Replies ride the normal
-	// broadcast pump, so no per-connection writes happen here. Malformed or
-	// non-command frames are ignored — the connection's job is reads.
+	// (decisions, prompts, settings, log clears) SYNCHRONOUSLY so command
+	// order is preserved (handlers are fast; none block on the network).
+	// Replies ride the normal broadcast pump, so no per-connection writes
+	// happen here. Malformed or non-command frames are ignored.
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -386,7 +416,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if len(data) == 0 {
 			continue
 		}
-		go s.handleClientFrameRaw(data)
+		s.handleClientFrameRaw(data)
 	}
 }
 
@@ -425,7 +455,10 @@ func (s *Server) handleQRCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInstallHooks(w http.ResponseWriter, r *http.Request) {
+	// Serialized with the permissions editor: both rewrite settings.json.
+	s.settingsMu.Lock()
 	err := hooks.InstallClaudeHooks(s.port)
+	s.settingsMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -636,6 +669,15 @@ func (s *Server) StartRelay(relayURL string) {
 	if s.relayURL == "" {
 		return
 	}
+	// The relay link now carries phone-originated COMMANDS (approvals,
+	// permission edits), so the transport must be encrypted whenever it
+	// leaves the machine: wss/https only, with plain ws/http tolerated
+	// solely for loopback test relays.
+	if !validRelayURL(s.relayURL) && !loopbackRelayURL(s.relayURL) {
+		log.Printf("refusing relay URL %q: command traffic requires wss:// or https:// off-loopback", s.relayURL)
+		s.relayURL = ""
+		return
+	}
 	// M5.1a caveat: Client.Start() is not itself guarded against double
 	// invocation, so a client instance must be started exactly once. That
 	// holds here because every apply builds a FRESH client and never calls
@@ -646,6 +688,20 @@ func (s *Server) StartRelay(relayURL string) {
 	c.OnClientFrame = func(frame []byte) { _ = s.handleClientFrameRaw(frame) }
 	c.Start(context.Background())
 	s.relayClient = c
+}
+
+// loopbackRelayURL accepts ws:// or http:// ONLY on loopback hosts (tests
+// run fake relays on 127.0.0.1).
+func loopbackRelayURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "ws" && u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 // StopRelay stops the current relay client and clears the setting (the

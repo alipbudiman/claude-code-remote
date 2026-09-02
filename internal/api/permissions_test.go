@@ -134,3 +134,33 @@ func TestAppSettingsPersistence(t *testing.T) {
 func decodeJSON(body string, v interface{}) error {
 	return json.Unmarshal([]byte(body), v)
 }
+
+func TestPermissionsSetMergesOmittedKeys(t *testing.T) {
+	withTempSettings(t, `{"permissions":{"defaultMode":"default","additionalDirectories":["/extra"]}}`)
+	s, _ := newDecideServer(t)
+	// The phone editor sends only mode + rule lists — additionalDirectories
+	// must survive the merge instead of being wiped.
+	err := s.permissionsSet(map[string]interface{}{
+		"defaultMode": "plan",
+		"allow":       []interface{}{"Bash(go test *)"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.permissionsGet()
+	if got["defaultMode"] != "plan" {
+		t.Fatalf("mode not set: %+v", got)
+	}
+	dirs, ok := got["additionalDirectories"].([]interface{})
+	if !ok || len(dirs) != 1 || dirs[0] != "/extra" {
+		t.Fatalf("additionalDirectories must survive the merge: %+v", got)
+	}
+}
+
+func TestPermissionsSetRejectsNonStringElements(t *testing.T) {
+	withTempSettings(t, `{}`)
+	s, _ := newDecideServer(t)
+	if err := s.permissionsSet(map[string]interface{}{"allow": []interface{}{123}}); err == nil {
+		t.Fatal("non-string element must be rejected")
+	}
+}
