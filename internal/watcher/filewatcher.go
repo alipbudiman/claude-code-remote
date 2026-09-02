@@ -267,12 +267,39 @@ func (tw *TranscriptWatcher) processTranscriptFile(sessionID, projectDir, filePa
 	tw.mu.Unlock()
 }
 
+// extractBlockText flattens a transcript block's text payload. With a key
+// ("thinking"/"text") it returns that string field; with an empty key it
+// flattens a tool_result's content, which is either a string or an array of
+// {type:"text",text} blocks.
+func extractBlockText(block map[string]interface{}, key string) string {
+	if key != "" {
+		s, _ := block[key].(string)
+		return s
+	}
+	switch c := block["content"].(type) {
+	case string:
+		return c
+	case []interface{}:
+		parts := make([]string, 0, len(c))
+		for _, item := range c {
+			if m, ok := item.(map[string]interface{}); ok {
+				if t, ok := m["text"].(string); ok {
+					parts = append(parts, t)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
 // handleUserRecord processes user-role transcript records. Its job is
 // tool_result synthesis: a completed tool_use shows up in the transcript as a
 // user record carrying a tool_result block, even when the hook bridge never
 // delivered a PostToolUse (server down, hook failure). Synthesizing one
 // retires the id from ActiveToolIDs so no phantom in-flight tool can block
-// the liveness stall fallback forever.
+// the liveness stall fallback forever. The block's content also feeds the
+// live process view (tool_result / tool_error events).
 //
 // Observed shape (2026-08-31, real transcripts under
 // ~/.claude/projects/d--CODING-claude-status-apk/*.jsonl, 101 records sampled):
@@ -307,6 +334,16 @@ func (tw *TranscriptWatcher) handleUserRecord(sess *models.Session, record map[s
 		if toolID == "" {
 			continue
 		}
+		// Live process feed: surface the result content.
+		detail := extractBlockText(block, "")
+		isErr, _ := block["is_error"].(bool)
+		kind, title := models.EventToolResult, "completed"
+		if isErr {
+			kind, title = models.EventToolError, "failed"
+		}
+		tw.store.AppendProcessEvent(sess.ID, &models.ProcessEvent{
+			Kind: kind, ToolUseID: toolID, Title: title, Detail: detail,
+		})
 		// Source="watcher": redundancy channel — state transitions apply
 		// (retire the tool id) but notifications stay suppressed. The
 		// seen-tool-id dedup in the store only gates PreToolUse, so this
@@ -386,8 +423,23 @@ func (tw *TranscriptWatcher) handleAssistantRecord(sess *models.Session, record 
 				Cwd:           sess.ProjectDir,
 				Source:        "watcher",
 			})
+		case "thinking":
+			// Live process feed: stream Claude's reasoning text.
+			if txt := extractBlockText(block, "thinking"); txt != "" {
+				tw.store.AppendProcessEvent(sess.ID, &models.ProcessEvent{
+					Kind: models.EventThinking, Title: "Thinking", Detail: txt,
+				})
+			}
 		case "text":
 			hasText = true
+			// Mid-turn narration streams into the feed; a final answer
+			// (stop_reason=end_turn) is carried by the turn_end event's
+			// detail instead, so it is not double-shown.
+			if txt := extractBlockText(block, "text"); txt != "" && stopReason != "end_turn" {
+				tw.store.AppendProcessEvent(sess.ID, &models.ProcessEvent{
+					Kind: models.EventText, Title: "Claude", Detail: txt,
+				})
+			}
 		}
 	}
 

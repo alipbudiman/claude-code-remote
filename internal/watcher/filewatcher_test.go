@@ -266,3 +266,81 @@ func TestStopDuringScanWaitsAndSavesOffsets(t *testing.T) {
 	// Double Stop (the deferred call on the shutdown path) is a no-op.
 	tw.Stop()
 }
+
+// --- live process feed extraction (2026-09-02) -------------------------------
+
+func TestHandleAssistantRecordExtractsThinkingAndText(t *testing.T) {
+	store := state.NewStore(0, nil)
+	tw := NewTranscriptWatcherWithPaths(store, t.TempDir(), filepath.Join(t.TempDir(), "offsets.json"))
+	sess := store.GetOrCreateSession("s1", "proj", "p.jsonl")
+	rec := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"id": "msg_1", "stop_reason": "tool_use",
+			"content": []interface{}{
+				map[string]interface{}{"type": "thinking", "thinking": "let me plan"},
+				map[string]interface{}{"type": "text", "text": "Working on it"},
+				map[string]interface{}{"type": "tool_use", "id": "t1", "name": "Bash",
+					"input": map[string]interface{}{"command": "ls"}},
+			},
+		},
+	}
+	tw.handleAssistantRecord(sess, rec)
+	evts := store.ProcessEvents("s1", 0, 50)
+	kinds := map[string]bool{}
+	for _, e := range evts {
+		kinds[string(e.Kind)] = true
+	}
+	if !kinds["thinking"] || !kinds["text"] || !kinds["tool_use"] {
+		t.Fatalf("expected thinking+text+tool_use events, got %+v", evts)
+	}
+	for _, e := range evts {
+		if e.Kind == "thinking" && e.Detail != "let me plan" {
+			t.Fatalf("thinking detail = %q", e.Detail)
+		}
+	}
+}
+
+func TestHandleAssistantRecordFinalTextNotDuplicated(t *testing.T) {
+	store := state.NewStore(0, nil)
+	tw := NewTranscriptWatcherWithPaths(store, t.TempDir(), filepath.Join(t.TempDir(), "offsets.json"))
+	sess := store.GetOrCreateSession("s1", "proj", "p.jsonl")
+	// A final answer record (stop_reason=end_turn) must not emit a text
+	// event — the turn_end Stop event carries last_assistant_message.
+	rec := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"id": "msg_2", "stop_reason": "end_turn",
+			"content": []interface{}{map[string]interface{}{"type": "text", "text": "Done!"}},
+		},
+	}
+	tw.handleAssistantRecord(sess, rec)
+	for _, e := range store.ProcessEvents("s1", 0, 50) {
+		if e.Kind == models.EventText {
+			t.Fatalf("final-answer text must not emit a text event, got %+v", e)
+		}
+	}
+}
+
+func TestHandleUserRecordExtractsToolResultContent(t *testing.T) {
+	store := state.NewStore(0, nil)
+	tw := NewTranscriptWatcherWithPaths(store, t.TempDir(), filepath.Join(t.TempDir(), "offsets.json"))
+	sess := store.GetOrCreateSession("s1", "proj", "p.jsonl")
+	rec := map[string]interface{}{
+		"type": "user",
+		"message": map[string]interface{}{"role": "user", "content": []interface{}{
+			map[string]interface{}{"type": "tool_result", "tool_use_id": "t1",
+				"content": []interface{}{map[string]interface{}{"type": "text", "text": "file-a\nfile-b"}}},
+		}},
+	}
+	tw.handleUserRecord(sess, rec)
+	found := false
+	for _, e := range store.ProcessEvents("s1", 0, 50) {
+		if e.Kind == models.EventToolResult && e.ToolUseID == "t1" && strings.Contains(e.Detail, "file-a") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected tool_result event with content, got %+v", store.ProcessEvents("s1", 0, 50))
+	}
+}
