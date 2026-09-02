@@ -79,6 +79,10 @@ type Server struct {
 	// uptimeStart anchors /api/health's uptime_s.
 	uptimeStart time.Time
 
+	// approvalWaitOverride shrinks the decision long-poll window in tests
+	// (0 = use the app-settings window; see decide.go).
+	approvalWaitOverride time.Duration
+
 	// relayMu guards relayClient/relayURL — the runtime-swappable relay
 	// connection (M11). The dashboard's POST /api/relay stops the current
 	// client and starts a fresh one under this mutex; graceful shutdown
@@ -247,6 +251,16 @@ func (s *Server) handleHookPost(w http.ResponseWriter, r *http.Request) {
 	payload.Source = ""
 
 	s.store.HandleHookEvent(payload)
+
+	// Decision mode (?decide=1, sent by the bridge's --decide entries):
+	// park a pending decision for permission/question/plan events and
+	// long-poll for the phone's answer; Stop checks the prompt queue. The
+	// response body is the Claude Code hook JSON the bridge forwards on
+	// stdout. Feed events (default mode) keep the plain ok response.
+	if r.URL.Query().Get("decide") == "1" {
+		s.decideHookEvent(w, payload)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
