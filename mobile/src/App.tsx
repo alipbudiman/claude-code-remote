@@ -11,9 +11,13 @@ import { BatteryBanner } from './components/BatteryBanner';
 import ProcessFeed from './components/ProcessFeed';
 import DecisionBanner from './components/DecisionBanner';
 import PromptComposer from './components/PromptComposer';
+import SettingsModal from './components/SettingsModal';
 import { wsService } from './services/websocketService';
 import { notificationService } from './services/notificationService';
-import { Session, AppNotification, PendingDecision, ProcessEvent, ServerStateSnapshot, WebSocketMessage } from './types';
+import {
+  AppSettings, PermissionsConfig, Session, AppNotification,
+  PendingDecision, ProcessEvent, ServerStateSnapshot, WebSocketMessage,
+} from './types';
 
 export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -39,6 +43,10 @@ export const App: React.FC = () => {
   // Remote decision (2026-09-02): the interactive banner's pending approval /
   // question / plan. Cleared on decision_resolved (answer or expiry).
   const [activeDecision, setActiveDecision] = useState<PendingDecision | undefined>();
+  // Remote Settings modal + its server-side state.
+  const [isRemoteSettingsOpen, setIsRemoteSettingsOpen] = useState<boolean>(false);
+  const [appSettings, setAppSettings] = useState<AppSettings>({ approval_wait_s: 60, log_autoclear_min: 0 });
+  const [permissions, setPermissions] = useState<PermissionsConfig | undefined>();
 
   useEffect(() => {
     // Check initial notification status
@@ -86,6 +94,7 @@ export const App: React.FC = () => {
     // Show the newest parked decision (usually none or one).
     const pending = snap.pending_decisions || [];
     setActiveDecision(pending.length > 0 ? pending[pending.length - 1] : undefined);
+    if (snap.app_settings) setAppSettings(snap.app_settings);
   };
 
   const handleWebSocketMessage = (msg: WebSocketMessage) => {
@@ -163,6 +172,14 @@ export const App: React.FC = () => {
           cur && cur.id === (msg.data as { decision_id: string }).decision_id ? undefined : cur
         );
         break;
+
+      case 'app_settings':
+        setAppSettings(msg.data as AppSettings);
+        break;
+
+      case 'permissions':
+        setPermissions((msg.data as { permissions: PermissionsConfig }).permissions);
+        break;
     }
   };
 
@@ -222,6 +239,10 @@ export const App: React.FC = () => {
         isWorking={isWorking}
         hasNotificationPerm={hasNotificationPerm}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenRemoteSettings={() => {
+          setIsRemoteSettingsOpen(true);
+          wsService.sendCommand('permissions_get');
+        }}
         onRequestNotifications={handleRequestNotifications}
       />
 
@@ -294,7 +315,12 @@ export const App: React.FC = () => {
         <ProcessFeed events={processEvents} />
 
         {/* 5. Real-Time Activity Log */}
-        <ActivityLogs logs={logs} notifications={notifications} />
+        <ActivityLogs
+          logs={logs}
+          notifications={notifications}
+          autoClearMin={appSettings.log_autoclear_min}
+          onClear={() => wsService.sendCommand('clear_logs')}
+        />
       </main>
 
       {/* 5. Live Stream Bar / Music-style Agent Monitor */}
@@ -312,6 +338,26 @@ export const App: React.FC = () => {
         hostIps={hostIps}
         port={serverPort}
         onSaveUrl={handleSaveUrl}
+      />
+
+      {/* Remote Settings Modal (permissions, approvals, log auto-clear) */}
+      <SettingsModal
+        open={isRemoteSettingsOpen}
+        onClose={() => setIsRemoteSettingsOpen(false)}
+        settings={appSettings}
+        permissions={permissions}
+        onAppSettings={(s) => {
+          setAppSettings(s);
+          wsService.sendCommand('app_settings', {
+            approval_wait_s: s.approval_wait_s,
+            log_autoclear_min: s.log_autoclear_min,
+          });
+        }}
+        onPermissions={(p) => {
+          setPermissions(p);
+          wsService.sendCommand('permissions_set', { permissions: p });
+        }}
+        onClearLogs={() => wsService.sendCommand('clear_logs')}
       />
     </div>
   );

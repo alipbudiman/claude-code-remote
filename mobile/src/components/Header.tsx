@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wifi, WifiOff, Settings, Bell, BellOff } from 'lucide-react';
+import { Wifi, WifiOff, Settings, Bell, BellOff, SlidersHorizontal } from 'lucide-react';
 import ColorIcon from '../assets/claudecode-color.svg';
 import MonoIcon from '../assets/claudecode.svg';
 
@@ -8,6 +8,7 @@ interface HeaderProps {
   isWorking: boolean;
   hasNotificationPerm: boolean;
   onOpenSettings: () => void;
+  onOpenRemoteSettings: () => void;
   onRequestNotifications: () => void;
 }
 
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   isWorking,
   hasNotificationPerm,
   onOpenSettings,
+  onOpenRemoteSettings,
   onRequestNotifications,
 }) => {
   return (
@@ -53,6 +55,15 @@ export const Header: React.FC<HeaderProps> = ({
           title={hasNotificationPerm ? 'Notifications Active' : 'Enable Notifications'}
         >
           {hasNotificationPerm ? <Bell size={16} /> : <BellOff size={16} />}
+        </button>
+
+        {/* Remote Settings (permissions, approvals, log auto-clear) */}
+        <button
+          onClick={onOpenRemoteSettings}
+          className="p-2 rounded-xl border bg-white/5 border-white/10 text-slate-300 hover:text-white transition-all"
+          title="Remote Settings"
+        >
+          <SlidersHorizontal size={16} />
         </button>
 
         {/* Connection Status & Settings */}
