@@ -191,3 +191,8 @@ Turned the monitor-only APK into a remote control surface, per the approved 15-t
 1. Prompts queued while fully idle deliver on the NEXT turn's end (no hook carries an injection into a dead-idle session; official RC has the same mid-turn queue semantics).
 2. dontAsk/auto modes editable but banner only reacts to PermissionRequest events.
 3. Relay-mode commands are WS-only (relay forwards frames, not HTTP) — REST mirrors are LAN/test conveniences.
+
+### Push + CI (2026-09-03)
+- Pushed `e3a714d..37242ed` (16 commits) to origin/main.
+- CI on 37242ed: **Build Go Server Binaries SUCCESS**, **Build & Release Android APK SUCCESS** — artifact `claude-remote-android-apk` (5.9 MB, expires 2026-12-01) at https://github.com/alipbudiman/claude-code-remote/actions.
+- Deployment note: the owner's previous release binary was running on :9280 during testing; replace it with the new build and start a fresh Claude Code session to activate the --decide hook entries.
