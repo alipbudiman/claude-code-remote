@@ -74,14 +74,64 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release-apk/claude-remote.apk
-          name: Claude Remote APK ${{ github.ref_name }}
+          name: Claude Remote ${{ github.ref_name }} — Remote Control (approvals, questions, live process view)
           body: |
-            ## Claude Code Remote Monitor Android APK
-            
-            - Real-time Claude Code session & sub-agent tracking
-            - Offline Local LAN Wi-Fi connection
-            - Push / Sound Notifications for active tasks and turn completion
-            - Working vs Idling visual indicators
+            ## 📱 Claude Code Remote — ${{ github.ref_name }}
+
+            Monitor **and control** Claude Code from your phone. This release turns the
+            monitor into a remote control surface: watch every step Claude executes, and
+            answer its questions and permission requests directly from your phone.
+
+            ### ✨ What's New
+
+            **Watch**
+            - **Live Process view** — every agent step as it happens: your prompts, Claude's
+              thinking, tool calls with full detail (commands, file edits), and results.
+              Long outputs scroll inside fixed-height boxes, so the view stays stable.
+            - **Activity log controls** — clear the log with one tap, or auto-drop entries
+              older than 5 / 15 / 30 minutes.
+
+            **Control**
+            - **Remote approvals** — permission requests appear on your phone with
+              Allow / Deny / "always allow" and an optional note for Claude. If you don't
+              answer in time, the request falls back to the normal PC terminal prompt —
+              Claude Code is never blocked.
+            - **Question answering** — Claude's multiple-choice questions arrive as tappable
+              options (multi-select + free-text notes); plan reviews show the full plan
+              with Approve / Reject.
+            - **Mid-task prompts** — queue a follow-up while Claude is still working; it's
+              delivered the moment the current turn ends (same semantics as the official
+              Remote Control).
+            - **Permission rules editor** — view and edit Claude Code's permission mode and
+              allow / ask / deny rules from the phone. Uses Claude Code's own rule syntax;
+              your other settings are preserved.
+
+            ### 🔄 How to update
+
+            1. Replace the desktop server binary with the new build and restart it — the
+               decision hooks are installed automatically on startup.
+            2. Install this APK over your existing app.
+            3. Start a **fresh** Claude Code session (already-running sessions keep the
+               hooks they started with).
+
+            Server binaries: see the [Build Server workflow](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml)
+            artifacts, or build from source with `go build ./cmd/server`.
+
+            ### 🛡 Safety
+
+            - Every wait has a timeout — an unreachable phone falls back to the PC terminal.
+            - `bypassPermissions` mode is unchanged: nothing is parked, nothing is bypassed.
+            - All control commands ride the same token-authenticated connection as the
+              status stream; the relay path requires encrypted `wss://`.
+
+            ### ⚠ Known limitations
+
+            - Prompts queued while the session is fully idle are delivered at the next
+              turn's end (an idle session has no hook to carry an injection).
+            - In `auto` / `dontAsk` permission modes the banner reacts only to the events
+              Claude Code emits in those modes.
+
+            **Full changelog**: compare [`e3a714d...${{ github.ref_name }}`](https://github.com/alipbudiman/claude-code-remote/compare/e3a714d...${{ github.ref_name }})
           draft: false
           prerelease: false
         env:
