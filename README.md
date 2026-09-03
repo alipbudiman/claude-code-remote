@@ -1,6 +1,6 @@
 # Claude Code Remote
 
-Real-time session monitoring for [Claude Code](https://github.com/anthropics/claude-code), from your phone.
+Monitor and control [Claude Code](https://github.com/anthropics/claude-code) from your phone — live process view, remote approvals, question answering, and queued prompts.
 
 [![Build APK](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-apk.yml/badge.svg)](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-apk.yml)
 [![Build Server](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml/badge.svg)](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml)
@@ -8,16 +8,21 @@ Real-time session monitoring for [Claude Code](https://github.com/anthropics/cla
 
 ## What is this?
 
-A small Go server runs on your PC and captures Claude Code hook events — tool calls, sub-agents, questions, permission requests, and completions. The Android app shows the live status and raises heads-up notifications; it runs as a foreground service, so tracking keeps working after you close the app or lock the phone. Everything works over local Wi-Fi with no internet required, and an optional relay (deployable on Railway) extends the same monitoring to any network. Sessions end in an explicit "✅ Task completed" state instead of a guess, and alerts you missed while offline are replayed on reconnect. Every connection is gated by a token that never leaves your machines.
+A small Go server runs on your PC and captures Claude Code hook events — tool calls, sub-agents, questions, permission requests, and completions. The Android app streams the live status, shows every step Claude is executing (including its thinking), and raises heads-up notifications; it runs as a foreground service, so tracking keeps working after you close the app or lock the phone.
+
+The app is not just a viewer. When Claude needs a decision — a permission approval, a multiple-choice question, a plan review — the request appears on your phone and your answer is delivered straight back into the Claude Code session on your PC. You can also queue a follow-up prompt while Claude is still working, and edit Claude Code's permission rules without touching the terminal.
+
+Everything works over local Wi-Fi with no internet required, and an optional relay (deployable on Railway) extends the same monitoring and control to any network. Sessions end in an explicit "✅ Task completed" state instead of a guess, and alerts you missed while offline are replayed on reconnect. Every connection is gated by a token that never leaves your machines.
 
 ## How it works
 
 ```
 Claude Code CLI
-   │  hook events (tools, sub-agents, questions, completions)
+   │  hook events (tools, thinking, questions, completions)
    ▼
 Hook bridge — ~/.claude/claude-remote-hook.js
    │  HTTP to the server (spools to disk while the server is down)
+   │  decision events long-poll until your phone answers
    ▼
 Desktop server — claude-remote-server.exe
    │  state store · durable event log · auth token · QR + web dashboard
@@ -27,41 +32,66 @@ Desktop server — claude-remote-server.exe
                   │
                   ▼
           Android app — foreground service + WebView UI,
-          heads-up notifications
+          heads-up notifications, approvals & commands
 ```
+
+Monitoring flows one way (PC → phone). Control flows the other: every tap on the phone — Allow, Deny, an option pick, a queued prompt, a settings change — travels the same authenticated WebSocket back to the server, which translates it into the official Claude Code hook-decision protocol. No terminal input is simulated, and nothing runs outside your machines.
 
 ## Features
 
+### Watch
+
+- **Live process view** — every agent step as it happens: your prompts, Claude's thinking, its replies, each tool call with full detail (commands, file edits), and every result. Long outputs scroll inside fixed-height boxes, so the view stays stable no matter how big an output gets.
 - Real-time session status and sub-agent tracking — role, current activity, duration
-- **Live process view** — streaming agent steps (prompts, thinking, text, tool calls, results); long outputs scroll inside fixed-height boxes so the view stays stable
-- **Remote approvals** — allow / deny / always-allow Claude Code permission requests from your phone (active whenever the permission mode is not `bypassPermissions`); if you don't answer in time, the PC terminal prompt appears as fallback
-- **Remote question answering** — pick from the options of Claude Code's `AskUserQuestion` prompts (multi-select + free-text notes) and approve or reject `ExitPlanMode` plans
-- **Permission settings editor** — view and edit `~/.claude/settings.json` permission rules (mode + allow/ask/deny lists) from the phone
-- **Mid-task prompt injection** — queue a prompt while Claude is working; it is delivered when the current turn ends (the same queue-until-turn-end behavior as Claude Remote Control)
-- **Activity log clearing** — clear manually, or auto-clear entries older than 5/15/30 minutes
 - Heads-up notifications for questions, permission requests, and completions
 - Background tracking via an Android foreground service — survives app close, reconnects automatically
 - Missed-alert replay — what happened while the phone was offline plays back on reconnect
-- QR-scan setup — point the app at the terminal QR code, done
 - Explicit "✅ Task completed" end state — no guessing whether a turn really finished
-- Two connection modes: direct LAN (no internet) or anywhere via a self-hosted relay
 - Durable event log — recent session history survives server and PC restarts
+
+### Control
+
+- **Remote approvals** — when Claude Code wants to run something that needs permission, the request appears on your phone with Allow / Deny / "always allow" buttons and an optional note for Claude. If you don't answer in time, the request simply falls back to the normal prompt on your PC terminal — nothing is ever lost or stuck.
+- **Remote question answering** — Claude's multiple-choice questions (`AskUserQuestion`) arrive as tappable options, multi-select included, with a free-text notes field. Plan reviews (`ExitPlanMode`) show the full plan in a scrollable pane with Approve / Reject.
+- **Mid-task prompt injection** — type a follow-up while Claude is still working; it's queued and delivered the moment the current turn ends (the same queue-until-turn-end behavior as the official Remote Control). The composer shows how many prompts are queued.
+- **Permission settings editor** — view and edit Claude Code's permission rules (`~/.claude/settings.json`) from the phone: the permission mode plus allow / ask / deny rule lists. Uses Claude Code's own rule syntax; changes apply from the next tool call.
+- **Activity log controls** — clear the log view with one tap, or auto-drop entries older than 5, 15, or 30 minutes.
+
+### Foundation
+
+- Two connection modes: direct LAN (no internet) or anywhere via a self-hosted relay
+- QR-scan setup — point the app at the terminal QR code, done
 - Windows logon autostart via `-install`
 - Token authentication on every API and WebSocket request
 
 ## Remote control from your phone
 
-The interactive features (approvals, questions, prompts, settings, log controls) work through the same hooks as everything else — no extra setup. They need the decision-mode hook entries, which the server installs automatically; if you are upgrading from an older release, restart the server once (or hit `POST /api/install-hooks`) so `~/.claude/settings.json` picks up the new entries, then start a fresh Claude Code session.
+The interactive features use the same hooks as the monitoring — there is no second system to install or configure. When a decision is needed, the hook pauses briefly, your phone shows the request, and your answer is returned through Claude Code's official hook-decision protocol. Two guarantees worth knowing:
 
-How each piece behaves:
+- **Never stuck.** Every wait has a timeout. If your phone is offline, unreachable, or you just don't answer, the request falls through to the normal prompt in your PC terminal — Claude Code keeps working exactly as before.
+- **Never bypassed.** In `bypassPermissions` mode nothing is parked at all (Claude Code skips those prompts anyway), and every answer travels the same token-authenticated connection as the status stream.
 
-- **Approvals.** When Claude Code is about to ask permission for a tool, the hook parks the request and your phone shows an Allow / Deny banner (with "always allow" options when the dialog offers them, plus an optional note for Claude). Answer within the configured wait (default 60 s, `Remote Settings → Remote approval wait`) or the request falls through to the normal terminal prompt. In `bypassPermissions` mode nothing is parked — prompts are skipped anyway.
-- **Questions.** `AskUserQuestion` options arrive as tappable choices (multi-select supported) with a free-text "Other / notes" field; `ExitPlanMode` shows the plan in a scrollable pane with Approve / Reject.
-- **Queued prompts.** Send while a turn is running and the prompt queues (the composer shows the queue depth); the Stop hook continues the conversation with your text when the turn finishes. Prompts queued while the session is fully idle are delivered on the next turn's end — a completely idle session has no hook to carry an injection (the official Remote Control has the same mid-turn queue semantics).
-- **Permission rules.** `Remote Settings` edits `permissions.defaultMode` and the allow/ask/deny rule lists using Claude Code's own rule syntax (`Bash(npm run *)`, `Read(./.env)`, …); every other settings key is preserved. Rules apply from Claude's next tool call.
-- **Logs.** `Activity Stream → trash icon` clears now; `Remote Settings → Activity log auto-clear` drops entries older than 5/15/30 minutes (Off by default).
+What each piece looks like on the phone:
 
-Everything rides the authenticated WebSocket, so it works identically over LAN and through the relay.
+| Feature | What you see | What happens on the PC |
+| --- | --- | --- |
+| Permission request | Golden banner: command or file, Allow / Deny, optional note, "always allow" when offered | Your choice is applied to that tool call; "always allow" also saves the matching rule |
+| Question | Tappable options (multi-select + notes) | Your selection is returned as the question's answer |
+| Plan review | The plan in a scrollable pane, Approve / Reject | Approval lets Claude start executing; rejection sends your note back as the reason |
+| Queued prompt | Composer with queue depth badge | Your text continues the conversation when the current turn ends |
+| Permission rules | Mode buttons + rule lists with add/delete | Written to `~/.claude/settings.json`; unrelated settings are preserved |
+
+Tuning: **Remote Settings → Remote approval wait** (15–105 s, default 60 s) controls how long a request waits for your phone before the PC terminal takes over.
+
+### Updating from an older release
+
+The control features need the decision-mode hook entries, which the server installs automatically. If you're upgrading:
+
+1. Replace the server binary with the new build and restart it — the hooks in `~/.claude/settings.json` are upgraded on startup (hooks from your other tools are left untouched).
+2. Install the new APK on your phone.
+3. Start a **fresh** Claude Code session — already-running sessions keep the hooks they started with.
+
+To verify, check that `~/.claude/settings.json` lists `claude-remote-hook.js --decide` for `PreToolUse`, `PermissionRequest`, and `Stop`, or simply run a command that needs permission and watch it appear on the phone.
 
 ## Quick Start
 
@@ -73,7 +103,7 @@ Download the server binary for your OS from [Releases](https://github.com/alipbu
 claude-remote-server.exe
 ```
 
-On first start the server installs the Claude Code hooks into `~/.claude/settings.json`, prints its LAN URL, and shows a QR code in the terminal. Opening the URL in a desktop browser gives you the same dashboard as the phone. To enable remote access later, open the dashboard in a browser and set the relay URL — no flags needed.
+On first start the server installs the Claude Code hooks into `~/.claude/settings.json` — including the decision hooks that power remote approvals and question answering — prints its LAN URL, and shows a QR code in the terminal. Opening the URL in a desktop browser gives you the same dashboard as the phone. To enable remote access later, open the dashboard in a browser and set the relay URL — no flags needed.
 
 Optional flags:
 
@@ -117,7 +147,13 @@ The relay image is republished automatically on every push to `main`; redeploy t
 
 ## Security
 
-The token is the room key for the status stream — anyone holding it can read your session status, so keep it private. It is generated automatically on your PC at `~/.claude/claude-remote-token`. To rotate it: delete the token file, restart the server (a new token is created), and re-enter the token on the phone.
+The token is the room key — anyone holding it can read your session status **and answer approvals or send prompts**, so keep it private. It is generated automatically on your PC at `~/.claude/claude-remote-token`. To rotate it: delete the token file, restart the server (a new token is created), and re-enter the token on the phone.
+
+Design notes for the control path:
+
+- Control commands ride the same token-authenticated WebSocket as the status stream — there is no unauthenticated endpoint, and in relay mode the transport must be `wss://` (encrypted) for the server to dial out.
+- The server only answers permission prompts on your behalf; it never bypasses Claude Code's permission system, and `bypassPermissions` behavior is unchanged.
+- Permission-rule edits are validated before they are written, merge with your existing `settings.json` (unknown keys and other tools' settings survive), and are serialized so concurrent edits cannot corrupt the file.
 
 ## Troubleshooting
 
@@ -129,6 +165,10 @@ The token is the room key for the status stream — anyone holding it can read y
   netsh advfirewall firewall add rule name="Claude Remote Server" dir=in action=allow protocol=TCP localport=9280
   ```
 
+- **Approvals and questions don't appear on the phone.** The Claude Code session is probably older than the upgrade — the decision hooks are picked up when a session starts. Also check `~/.claude/settings.json` lists `claude-remote-hook.js --decide` for `PreToolUse`, `PermissionRequest`, and `Stop`; if not, restart the server (it re-installs hooks on startup) and start a fresh session. Approvals are also skipped in `bypassPermissions` mode — that's expected.
+
+- **A permission request went to the PC terminal instead of my phone.** The phone didn't answer within the approval wait (offline, disconnected, or you missed the banner), so the request fell back to the terminal — by design, so Claude Code is never blocked. Raise the wait in `Remote Settings → Remote approval wait` if this happens often.
+
 ## Development
 
 ```bash
@@ -136,7 +176,10 @@ go build ./cmd/server                                            # desktop serve
 go test ./...                                                    # Go tests
 npm --prefix mobile run build                                    # Android web UI
 powershell -ExecutionPolicy Bypass -File scripts\test-mock-hook.ps1   # simulate hook events
+powershell -ExecutionPolicy Bypass -File scripts\test-mock-hook.ps1 -Port 9293   # …against a scratch server
 ```
+
+The mock script exercises the full lifecycle — tool use, sub-agents, turn end — plus the remote-control round trips: a permission approval answered from the "phone" side while the hook long-polls, a queued prompt delivered through the Stop hook, and the live process feed via `/api/process`. Use `-Port` to target a test server without disturbing one already running on the default port.
 
 CI builds the APK and the Windows/Linux/macOS server binaries on every push and attaches them to Releases on tags; every workflow run also uploads them as downloadable artifacts.
 
