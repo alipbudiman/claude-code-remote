@@ -114,8 +114,20 @@ jobs:
             3. Start a **fresh** Claude Code session (already-running sessions keep the
                hooks they started with).
 
-            Server binaries: see the [Build Server workflow](https://github.com/alipbudiman/claude-code-remote/actions/workflows/build-server.yml)
-            artifacts, or build from source with `go build ./cmd/server`.
+            ### 📦 Downloads (this release)
+
+            | File | What it is |
+            | --- | --- |
+            | `claude-remote.apk` | The Android app |
+            | `claude-remote-server-windows-amd64.exe` | Desktop server for Windows (the main download) |
+            | `claude-remote-server-linux-amd64` | Desktop server for Linux |
+            | `claude-remote-server-darwin-arm64` | Desktop server for macOS (Apple Silicon) |
+            | `claude-remote-server-darwin-amd64` | Desktop server for macOS (Intel) |
+
+            Run the server for your OS (Windows: double-click or run in a terminal —
+            Linux/macOS: `chmod +x` first). On first start it prints its LAN URL and a
+            QR code to scan from the app. Build from source instead with
+            `go build ./cmd/server`.
 
             ### 🛡 Safety
 

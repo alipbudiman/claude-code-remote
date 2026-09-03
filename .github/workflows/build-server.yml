@@ -59,6 +59,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: bin/${{ matrix.output }}
+          # Same release as the APK workflow (matched by tag); the title/body
+          # live there — this only sets the name so the release is titled
+          # correctly even when this matrix leg lands first.
+          name: Claude Remote ${{ github.ref_name }} — Remote Control (approvals, questions, live process view)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
